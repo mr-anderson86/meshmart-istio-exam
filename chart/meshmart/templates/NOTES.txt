@@ -1,0 +1,9 @@
+MeshMart is deploying into namespace "{{ .Release.Namespace }}".
+
+  kubectl -n {{ .Release.Namespace }} get pods -L app,version
+
+UI:
+{{- if eq .Values.gateway.service.type "NodePort" }}
+  http://localhost:{{ .Values.gateway.service.nodePort }}
+{{- end }}
+  or: kubectl -n {{ .Release.Namespace }} port-forward svc/gateway 8080:{{ .Values.gateway.service.port }}  ->  http://localhost:8080

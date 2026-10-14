@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshMart</title>
+<style>
+  :root { --bg:#f5f6f8; --fg:#1b2130; --card:#ffffff; --line:#dde1e8; --muted:#6b7280;
+          --ok:#15803d; --okbg:#dcfce7; --bad:#b91c1c; --badbg:#fee2e2; --accent:#2563eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1117; --fg:#e6e8ec; --card:#161a22; --line:#2a303b; --muted:#9aa3b2;
+            --ok:#4ade80; --okbg:#12301f; --bad:#f87171; --badbg:#3a1616; --accent:#60a5fa; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 28px 16px 48px; }
+  h1 { margin: 0 0 2px; font-size: 26px; }
+  .muted { color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-top: 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--fg); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.internal { border-style: dashed; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.45 ui-monospace, Menlo, monospace;
+        max-height: 520px; overflow: auto; }
+  .badge { display:inline-block; padding: 1px 8px; border-radius: 999px; font-weight: 600; font-size: 13px; }
+  .ok  { color: var(--ok);  background: var(--okbg); }
+  .bad { color: var(--bad); background: var(--badbg); }
+  #summary { min-height: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>MeshMart</h1>
+  <div class="muted">Istio practical exam &middot; everything below goes through the nginx API gateway</div>
+
+  <div class="card">
+    <h2>Single requests</h2>
+    <div class="row">
+      <button data-path="/api/catalog">Browse catalog</button>
+      <button data-path="/api/orders">Place order</button>
+      <button class="internal" data-path="/api/inventory" title="Should be forbidden after lockdown">Inventory (direct)</button>
+      <button class="internal" data-path="/api/payments" title="Should be forbidden after lockdown">Payments (direct)</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label><input type="checkbox" id="canary"> send header <code>x-canary: always</code></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Bursts (20 parallel requests)</h2>
+    <div class="row">
+      <button data-burst="/api/catalog">Burst catalog</button>
+      <button data-burst="/api/orders">Burst orders</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Result</h2>
+    <div id="summary" class="muted">Click a button.</div>
+    <pre id="out"></pre>
+  </div>
+</main>
+
+<script>
+  const out = document.getElementById('out');
+  const summary = document.getElementById('summary');
+
+  function headers() {
+    return document.getElementById('canary').checked ? { 'x-canary': 'always' } : {};
+  }
+  function badge(status) {
+    return `<span class="badge ${status >= 200 && status < 300 ? 'ok' : 'bad'}">${status || 'ERR'}</span>`;
+  }
+  function fmt(counts) {
+    return Object.entries(counts).sort().map(([k, v]) => `${k}: ${v}`).join(', ') || '-';
+  }
+  async function hit(path) {
+    const t0 = performance.now();
+    try {
+      const r = await fetch(path, { headers: headers(), cache: 'no-store' });
+      const text = await r.text();
+      let body; try { body = JSON.parse(text); } catch { body = text; }
+      return { status: r.status, ms: Math.round(performance.now() - t0), servedBy: r.headers.get('x-served-by'), body };
+    } catch (e) {
+      return { status: 0, ms: Math.round(performance.now() - t0), body: String(e) };
+    }
+  }
+
+  document.querySelectorAll('[data-path]').forEach(btn => btn.addEventListener('click', async () => {
+    summary.textContent = 'Loading…'; out.textContent = '';
+    const r = await hit(btn.dataset.path);
+    summary.innerHTML = `${badge(r.status)} <code>${btn.dataset.path}</code> &middot; ${r.ms} ms &middot; gateway pod ${r.servedBy || '?'}`;
+    out.textContent = typeof r.body === 'string' ? r.body : JSON.stringify(r.body, null, 2);
+  }));
+
+  document.querySelectorAll('[data-burst]').forEach(btn => btn.addEventListener('click', async () => {
+    const path = btn.dataset.burst;
+    summary.textContent = 'Running 20 requests…'; out.textContent = '';
+    const results = await Promise.all(Array.from({ length: 20 }, () => hit(path)));
+    const statuses = {}, versions = {};
+    for (const r of results) {
+      statuses[r.status] = (statuses[r.status] || 0) + 1;
+      const v = r.body && r.body.version;
+      if (v) versions[v] = (versions[v] || 0) + 1;
+    }
+    summary.innerHTML = `<code>${path}</code> &times; 20 &middot; status codes: <b>${fmt(statuses)}</b> &middot; versions: <b>${fmt(versions)}</b>`;
+    out.textContent = results.map((r, i) =>
+      `#${String(i + 1).padStart(2, '0')}  ${r.status}  ${String(r.ms).padStart(5)} ms  ${(r.body && r.body.version) || ''}`
+    ).join('\n');
+  }));
+</script>
+</body>
+</html>

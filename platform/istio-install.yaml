@@ -1,0 +1,25 @@
+# Istio control plane sized for a laptop (Rancher Desktop).
+#   istioctl install -f platform/istio-install.yaml -y
+#
+# profile: minimal -> istiod only, no ingress gateway. MeshMart brings its own
+# nginx gateway, and Rancher Desktop's Traefik already holds ports 80/443.
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  profile: minimal
+  meshConfig:
+    accessLogFile: /dev/stdout        # Envoy access logs: kubectl logs <pod> -c istio-proxy
+  components:
+    pilot:
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+  values:
+    global:
+      proxy:
+        resources:
+          requests:
+            cpu: 10m
+            memory: 40Mi

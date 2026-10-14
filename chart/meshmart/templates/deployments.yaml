@@ -1,0 +1,64 @@
+{{- range $name, $svc := .Values.services }}
+{{- range $version, $v := $svc.versions }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-{{ $version }}
+  labels:
+    {{- include "meshmart.labels" $ | nindent 4 }}
+    app: {{ $name }}
+    version: {{ $version }}
+spec:
+  replicas: {{ $v.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+      version: {{ $version }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        version: {{ $version }}
+      annotations:
+        checksum/code: {{ include (print $.Template.BasePath "/app-code.yaml") $ | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      containers:
+        - name: {{ $name }}
+          image: {{ $.Values.images.app }}
+          imagePullPolicy: {{ $.Values.imagePullPolicy }}
+          command: ["python", "-u", "/app/app.py"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: {{ $name | quote }}
+            - name: VERSION
+              value: {{ $version | quote }}
+            - name: UPSTREAMS
+              value: {{ join "," ($svc.upstreams | default (list)) | quote }}
+            - name: REDIS_ADDR
+              value: {{ ternary "redis:6379" "" (default false $svc.redis) | quote }}
+            - name: FAIL_RATE
+              value: {{ $v.failRate | default "0" | quote }}
+            - name: DELAY_MS
+              value: {{ $v.delayMs | default "0" | quote }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: meshmart-app-code
+{{- end }}
+{{- end }}

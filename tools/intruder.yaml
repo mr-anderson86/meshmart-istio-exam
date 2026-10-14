@@ -1,0 +1,20 @@
+# A "rogue" pod outside the shop namespace. Use it to prove what is (not) reachable.
+#   kubectl apply -f tools/intruder.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intruder
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: intruder
+  namespace: intruder
+  labels:
+    app: intruder
+spec:
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: shell
+      image: curlimages/curl:8.10.1
+      command: ["sleep", "infinity"]

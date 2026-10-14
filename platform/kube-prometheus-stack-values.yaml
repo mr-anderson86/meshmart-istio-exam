@@ -1,0 +1,22 @@
+# BONUS path only. Install with:
+#   helm upgrade --install kps prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace -f platform/kube-prometheus-stack-values.yaml
+fullnameOverride: kps
+
+alertmanager:
+  enabled: false
+
+grafana:
+  adminPassword: admin
+
+prometheus:
+  prometheusSpec:
+    # Pick up ServiceMonitors/PodMonitors from ANY release/namespace,
+    # not just the ones labelled release=kps.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    retention: 1d
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi

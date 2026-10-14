@@ -1,0 +1,45 @@
+# MeshMart Helm values.
+# All images are public and multi-arch (they run on Apple Silicon and Intel).
+
+images:
+  app: python:3.12-alpine        # runs files/app.py for every backend service
+  gateway: nginx:1.27-alpine
+  redis: redis:7.4-alpine
+imagePullPolicy: IfNotPresent
+
+gateway:
+  replicas: 1
+  service:
+    type: NodePort
+    port: 80
+    nodePort: 30080              # UI at http://localhost:30080
+
+redis:
+  enabled: true
+
+# Backend services. Each one gets:
+#   - its own ServiceAccount (named after the service)
+#   - one Kubernetes Service on port 8080 (selector: app=<name>)
+#   - one Deployment per entry in "versions", labelled app=<name>, version=<version>
+services:
+  catalog:
+    upstreams: ["http://inventory:8080/stock"]
+    versions:
+      v1: { replicas: 1 }
+      v2: { replicas: 1 }        # the "new release" you will canary
+  inventory:
+    versions:
+      v1: { replicas: 1 }
+  orders:
+    upstreams: ["http://payments:8080/charge"]
+    redis: true                  # orders INCRs a counter in Redis on every checkout
+    versions:
+      v1: { replicas: 1 }
+  payments:
+    versions:
+      v1: { replicas: 1, failRate: "0.3" }   # flaky on purpose: ~30% HTTP 500
+      # delayMs: 0                            # optional artificial latency
+
+resources:
+  requests: { cpu: 10m, memory: 32Mi }
+  limits: { memory: 128Mi }

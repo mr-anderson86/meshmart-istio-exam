@@ -1,0 +1,25 @@
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meshmart.labels" $ | nindent 4 }}
+    app: {{ $name }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meshmart.labels" $ | nindent 4 }}
+    app: {{ $name }}
+spec:
+  selector:
+    app: {{ $name }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}
