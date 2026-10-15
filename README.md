@@ -66,7 +66,7 @@ exist so you can prove your lockdown works.
 │   ├── files/gateway/           <- nginx config + UI
 │   └── templates/
 ├── istio/                       <- YOUR Istio manifests go here
-├── platform/                    <- Istio install config + bonus observability values
+├── platform/                    <- Helm values: Istio, kube-prometheus-stack, Kiali
 └── tools/
     ├── intruder.yaml            <- a rogue pod in another namespace
     ├── load.sh                  <- traffic generator with status/version summary
@@ -79,13 +79,19 @@ exist so you can prove your lockdown works.
 
 | Tool | Notes |
 |---|---|
-| **Rancher Desktop** | Kubernetes enabled (it runs k3s). In *Preferences → Virtual Machine* give it **4 CPUs and at least 6 GB RAM** (8 GB if you do the kube-prometheus-stack bonus). Either container engine works. |
+| **Rancher Desktop** | Kubernetes enabled (it runs k3s). In *Preferences → Virtual Machine* give it **4 CPUs and 8 GB RAM** (Part 3 runs kube-prometheus-stack). Either container engine works. |
 | `kubectl` | Ships with Rancher Desktop. Check `kubectl config current-context` is `rancher-desktop`. |
-| `helm` (v3) | Ships with Rancher Desktop, or `brew install helm`. |
-| `istioctl` | Installed in Part 2 (download script below). |
+| `helm` (3.6+ or 4) | Ships with Rancher Desktop, or `brew install helm`. **Everything is installed with Helm**, as in production. |
+| `istioctl` | `brew install istioctl`. Used only as a debugging CLI (`analyze`, `proxy-config`, `describe`), never to install. Keep it on the same minor version as the control plane. |
 | `curl`, `bash` | Already on macOS. |
 
-Optional, bonus only: the `prometheus-community` Helm repo for kube-prometheus-stack.
+Helm repositories used (added in Parts 2 and 3):
+
+| Repo | URL | Charts |
+|---|---|---|
+| `istio` | https://blob.istio.io/istio-release/charts | `base`, `istiod` (and `gateway` for bonus B3) |
+| `prometheus-community` | https://prometheus-community.github.io/helm-charts | `kube-prometheus-stack` |
+| `kiali` | https://kiali.org/helm-charts | `kiali-server` |
 
 > **Reaching the UI.** The gateway is a NodePort Service on **30080**, so try **http://localhost:30080** first;
 > Rancher Desktop normally forwards NodePorts to localhost. If that doesn't load, fall back to
@@ -142,24 +148,37 @@ tools/load.sh /api/orders 50
 
 ---
 
-## Part 2: Install Istio and onboard MeshMart (15 pts)
+## Part 2: Install Istio with Helm and onboard MeshMart (15 pts)
 
-Download Istio **outside this repo** (it brings `istioctl` and the sample addons you'll need in Part 3):
+Install Istio the way a platform team runs it in production: the official Helm charts, **one pinned version
+for every Istio chart**, and values files kept in Git (`platform/`). In a real company the same values would be
+fed to Argo CD or Terraform rather than typed by hand (see bonus B7).
 
 ```bash
-cd ~ && curl -L https://istio.io/downloadIstio | sh -
-cd istio-*/ && export PATH="$PWD/bin:$PATH" && export ISTIO_HOME="$PWD"
-cd -   # back to the repo
-istioctl version
-istioctl x precheck
+brew install istioctl            # debugging CLI only
+istioctl x precheck              # is the cluster ready for Istio?
+
+helm repo add istio https://blob.istio.io/istio-release/charts
+helm repo update
+helm search repo istio/istiod --versions | head -5     # pick the latest stable release
+export ISTIO_VERSION=1.31.1                            # pin it; use the same version for every Istio chart
+
+# 1. CRDs and cluster-wide resources
+helm upgrade --install istio-base istio/base -n istio-system --create-namespace \
+  --version "$ISTIO_VERSION" -f platform/istio-base-values.yaml --wait
+
+# 2. Control plane (istiod)
+helm upgrade --install istiod istio/istiod -n istio-system \
+  --version "$ISTIO_VERSION" -f platform/istiod-values.yaml --wait
+
+helm ls -n istio-system
+kubectl -n istio-system get pods
+istioctl version                 # client and control plane should match (within one minor)
 ```
 
-Install the control plane with the laptop-sized config in this repo, then onboard the `shop` namespace:
+Onboard the `shop` namespace:
 
 ```bash
-istioctl install -f platform/istio-install.yaml -y
-kubectl -n istio-system get pods
-
 kubectl label namespace shop istio-injection=enabled
 kubectl -n shop rollout restart deployment
 kubectl -n shop get pods            # each pod should now report 2/2
@@ -173,33 +192,53 @@ Click through the UI again and repeat the intruder tests from Part 1.
   encrypted right now? How can you tell?
 - **Q2.3** Compare the `caller_identity` field in a catalog response now vs. Part 1. Where does that value come
   from, and what is its format?
+- **Q2.4** Why is Istio split into separate `base` and `istiod` charts, installed in that order? Why must they
+  share one version? In production, how would you upgrade to the next Istio minor version without moving every
+  workload at once? (Hint: look up istiod *revisions* and *revision tags*.)
 
 ---
 
 ## Part 3: Observability (10 pts)
 
-Install the sample addons that ship with the Istio release (lab-quality, not for production):
+Production-style monitoring: **kube-prometheus-stack** scrapes istiod and every Envoy sidecar (the
+ServiceMonitor and PodMonitor are defined in its values file), and **Kiali** runs as its own Helm release
+pointed at that Prometheus.
 
 ```bash
-kubectl apply -f "$ISTIO_HOME/samples/addons/prometheus.yaml"
-kubectl apply -f "$ISTIO_HOME/samples/addons/grafana.yaml"
-kubectl apply -f "$ISTIO_HOME/samples/addons/kiali.yaml"   # if this errors on first run, run it again
-kubectl -n istio-system rollout status deploy/kiali
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add kiali https://kiali.org/helm-charts
+helm repo update
+
+helm upgrade --install kps prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace -f platform/kube-prometheus-stack-values.yaml --wait
+kubectl -n monitoring get svc kps-prometheus        # Kiali points at this Service
+
+helm upgrade --install kiali-server kiali/kiali-server \
+  -n istio-system -f platform/kiali-values.yaml --wait
 
 # keep some traffic flowing in another terminal
 tools/load.sh /api/catalog 500 3 & tools/load.sh /api/orders 500 3 &
 
-istioctl dashboard kiali      # opens http://localhost:20001
-istioctl dashboard grafana    # Istio dashboards are preloaded under "istio"
+# each port-forward blocks, so run them in separate terminals
+kubectl -n istio-system port-forward svc/kiali 20001:20001     # http://localhost:20001
+kubectl -n monitoring port-forward svc/kps-grafana 3000:80     # http://localhost:3000 (admin / admin)
+kubectl -n monitoring port-forward svc/kps-prometheus 9090     # http://localhost:9090 (optional)
 ```
 
+In Grafana, import the official Istio dashboards (*Dashboards → New → Import*, choose the Prometheus data
+source): **7639** (Mesh), **7636** (Service), **7630** (Workload) and **7645** (Control Plane).
+
 In Kiali, open **Traffic Graph** for namespace `shop` (enable the *Security* display option), then
-**Istio Config**. You'll come back to Istio Config after Parts 4 and 5 to see your own rules there.
+**Istio Config**. You'll come back to Istio Config after Parts 4 and 5 to see your own rules there and fix any
+validation warnings it shows.
 
 - **Q3.1** Which edges in the graph show a padlock and which don't? Why is the traffic *entering* the gateway
   different from the rest?
 - **Q3.2** What is the error rate of `payments` according to Kiali or Grafana? The app exports no metrics at all,
   so where do these numbers come from?
+- **Q3.3** In Prometheus *Status → Targets*, find the Envoy targets. Why does the PodMonitor in
+  `platform/kube-prometheus-stack-values.yaml` rewrite `__address__` instead of scraping the pod's declared
+  container port?
 
 ---
 
@@ -304,40 +343,33 @@ tools/load.sh /api/orders 100 5     # before and after
 
 ---
 
-## Bonus (up to +20)
+## Bonus (up to +25)
 
-Put bonus manifests in `istio/experiments/` or `platform/` and describe them in `ANSWERS.md`.
+Put bonus manifests and values in `istio/experiments/`, `platform/` or a new `gitops/` folder, and describe
+them in `ANSWERS.md`.
 
 - **B1 Circuit breaking (+4).** Add connection-pool limits and outlier detection for payments. Trigger them with
   `tools/load.sh /api/orders 200 20` and find the evidence in the `istio-proxy` access log of the orders pod
   (look at the response flags). How do retries and circuit breaking interact?
-- **B2 Production-style observability with your own Kiali (+5).** Replace the sample addons with
-  kube-prometheus-stack plus Kiali, using the files in `platform/`:
-
-  ```bash
-  kubectl delete -f "$ISTIO_HOME/samples/addons" --ignore-not-found   # remove the Part 3 sample addons first
-  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts && helm repo update
-  helm upgrade --install kps prometheus-community/kube-prometheus-stack \
-    -n monitoring --create-namespace -f platform/kube-prometheus-stack-values.yaml
-  kubectl apply -f platform/istio-prometheus-monitors.yaml
-  kubectl -n monitoring get svc | grep prometheus      # confirm the URL used in kiali-values.yaml
-  helm upgrade --install kiali-server kiali-server --repo https://kiali.org/helm-charts \
-    -n istio-system -f platform/kiali-values.yaml
-  kubectl -n istio-system port-forward svc/kiali 20001:20001        # http://localhost:20001
-  kubectl -n monitoring port-forward svc/kps-grafana 3000:80        # http://localhost:3000 (admin/admin)
-  ```
-
-  In Grafana, import the Istio dashboards from grafana.com: **7639** (Mesh), **7636** (Service),
-  **7630** (Workload) and **7645** (Control Plane). In Kiali, use **Istio Config** to review every policy you
-  wrote and fix any validation warnings it shows. Explain why the PodMonitor relabels `__address__`.
-- **B3 Istio ingress gateway (+4).** Replace the NodePort-on-nginx edge with an Istio ingress gateway
-  (`Gateway` + `VirtualService`) in front of nginx. Note that Rancher Desktop's Traefik already holds ports
-  80/443. What do you gain at the edge compared to Q4.1's fix?
-- **B4 Distributed tracing (+4).** Wire up Jaeger and show one trace that spans gateway → orders → payments.
-  Why does the app have to forward trace headers itself?
+- **B2 Dashboards as code (+5).** Replace the manual Grafana import with declarative provisioning in
+  `platform/kube-prometheus-stack-values.yaml`, so a fresh cluster comes up with the four Istio dashboards.
+  Then enable Grafana in `platform/kiali-values.yaml` so Kiali links to them. How would you keep the dashboard
+  revisions in step with Istio upgrades?
+- **B3 Istio ingress gateway (+4).** Replace the NodePort-on-nginx edge with an Istio ingress gateway installed
+  from the `istio/gateway` chart (same `$ISTIO_VERSION`), plus a `Gateway` and `VirtualService` in front of
+  nginx. Rancher Desktop's Traefik already holds ports 80/443, so plan for that. What do you gain at the edge
+  compared to Q4.1's fix?
+- **B4 Distributed tracing (+4).** Install Jaeger with its Helm chart, point Istio at it through
+  `platform/istiod-values.yaml`, and show one trace that spans gateway → orders → payments. Why does the app
+  have to forward trace headers itself?
 - **B5 Mirroring (+2).** Mirror 100% of catalog v1 traffic to v2 without users seeing v2 responses.
 - **B6 Ambient mode (+1).** In a few sentences: how would your Part 4 and Part 5 config change in Istio
-  ambient mode? Which of your policies would need a waypoint proxy, and why?
+  ambient mode? Which extra Helm charts would you install, and which of your policies would need a waypoint
+  proxy?
+- **B7 GitOps (+5).** Manage everything with Argo CD instead of `helm` by hand: Applications for `istio-base`,
+  `istiod`, `kps`, `kiali-server`, `meshmart` and the `istio/` folder, ordered with sync waves. Argo will keep
+  showing one istiod resource as *OutOfSync* even though nothing is wrong. Which one, why, and how do you fix
+  it properly?
 
 ---
 
@@ -351,7 +383,7 @@ Put bonus manifests in `istio/experiments/` or `platform/` and describe them in 
 | 4. Zero trust | 30 |
 | 5. Traffic management | 25 |
 | Written | 10 |
-| **Total** | **100** (+20 bonus) |
+| **Total** | **100** (+25 bonus) |
 
 Reviewers look at: correctness (does `tools/check.sh` pass on a fresh cluster), least privilege (no
 over-broad allows, no `*` principals where a specific one works), clarity of explanations, and clean,
@@ -362,6 +394,7 @@ reviewable YAML and commits.
 ## Useful commands
 
 ```bash
+helm ls -A                                                # every release and its chart version
 istioctl analyze -n shop                                  # config mistakes
 istioctl x describe pod <pod> -n shop                     # which rules apply to a pod
 istioctl proxy-config routes deploy/gateway-v1 -n shop    # what the gateway's Envoy will route
@@ -373,12 +406,20 @@ tools/check.sh                                            # self-check for the f
 
 ## Cleanup
 
+Uninstall in reverse order:
+
 ```bash
 helm -n shop uninstall meshmart
 kubectl delete namespace shop intruder
-kubectl delete -f "$ISTIO_HOME/samples/addons" --ignore-not-found
-helm -n istio-system uninstall kiali-server 2>/dev/null; helm -n monitoring uninstall kps 2>/dev/null
-istioctl uninstall --purge -y && kubectl delete namespace istio-system monitoring --ignore-not-found
+helm -n istio-system uninstall kiali-server
+helm -n monitoring uninstall kps
+helm -n istio-system uninstall istiod
+helm -n istio-system uninstall istio-base
+kubectl delete namespace istio-system monitoring
+
+# Helm leaves CRDs behind on purpose. Deleting them removes every Istio /
+# Prometheus Operator resource in the cluster, so only do this on a lab cluster.
+kubectl get crd -oname | grep -E 'istio.io|monitoring.coreos.com' | xargs kubectl delete
 ```
 
 ---

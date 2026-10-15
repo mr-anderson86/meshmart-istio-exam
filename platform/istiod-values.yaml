@@ -1,0 +1,25 @@
+# Helm values for the istio/istiod chart (the control plane), sized for a laptop.
+#
+#   helm upgrade --install istiod istio/istiod -n istio-system \
+#     --version "$ISTIO_VERSION" -f platform/istiod-values.yaml --wait
+#
+# Production would differ mainly here: replicaCount >= 2 with autoscaling and a
+# PodDisruptionBudget, real resource requests, and a "revision" for canary upgrades.
+
+pilot:
+  replicaCount: 1
+  autoscaleEnabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+meshConfig:
+  accessLogFile: /dev/stdout        # Envoy access logs: kubectl logs <pod> -c istio-proxy
+
+global:
+  proxy:                            # every injected sidecar
+    resources:
+      requests:
+        cpu: 10m
+        memory: 40Mi

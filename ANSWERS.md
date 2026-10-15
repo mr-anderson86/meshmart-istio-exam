@@ -20,11 +20,15 @@ Time spent:
 
 **Q2.3**
 
+**Q2.4**
+
 ## Part 3 - Observability
 
 **Q3.1**
 
 **Q3.2**
+
+**Q3.3**
 
 ## Part 4 - Zero trust
 

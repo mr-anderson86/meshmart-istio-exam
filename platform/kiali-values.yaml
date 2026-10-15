@@ -1,13 +1,16 @@
-# BONUS path only: Kiali pointed at kube-prometheus-stack.
-#   helm upgrade --install kiali-server kiali-server --repo https://kiali.org/helm-charts \
-#     -n istio-system -f platform/kiali-values.yaml
-# Check the Prometheus service name first:  kubectl -n monitoring get svc | grep prometheus
+# Helm values for the kiali-server chart, pointed at kube-prometheus-stack.
+#
+#   helm upgrade --install kiali-server kiali/kiali-server -n istio-system \
+#     -f platform/kiali-values.yaml --wait
+#
+# The Prometheus URL assumes the kps release from kube-prometheus-stack-values.yaml:
+#   kubectl -n monitoring get svc kps-prometheus
 auth:
   strategy: anonymous            # lab only - never in production
 external_services:
   prometheus:
     url: http://kps-prometheus.monitoring:9090
   grafana:
-    enabled: false               # optional: wire Grafana links later if you like
+    enabled: false               # bonus B2 asks you to wire this up
   tracing:
     enabled: false

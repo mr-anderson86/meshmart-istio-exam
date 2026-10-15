@@ -1,0 +1,11 @@
+# Helm values for the istio/base chart (CRDs and cluster-wide resources).
+#
+#   helm upgrade --install istio-base istio/base -n istio-system --create-namespace \
+#     --version "$ISTIO_VERSION" -f platform/istio-base-values.yaml --wait
+#
+# In production these values files live in Git and are fed to Argo CD / Flux
+# (or Terraform helm_release) instead of being run by hand.
+
+# Which istiod revision serves the default validation webhook.
+# "default" matches the istiod release installed without a revision.
+defaultRevision: default

@@ -1,13 +1,25 @@
-# BONUS path only. Install with:
+# Helm values for kube-prometheus-stack, including the Istio scrape config.
+#
 #   helm upgrade --install kps prometheus-community/kube-prometheus-stack \
-#     -n monitoring --create-namespace -f platform/kube-prometheus-stack-values.yaml
+#     -n monitoring --create-namespace -f platform/kube-prometheus-stack-values.yaml --wait
 fullnameOverride: kps
 
 alertmanager:
   enabled: false
 
 grafana:
-  adminPassword: admin
+  adminPassword: admin              # lab only
+
+# k3s (Rancher Desktop) runs these inside one binary, so their scrape
+# targets would just show as DOWN. Turn them off to keep the lab quiet.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
 
 prometheus:
   prometheusSpec:
@@ -20,3 +32,55 @@ prometheus:
       requests:
         cpu: 100m
         memory: 400Mi
+
+  # istiod metrics (control plane). Adapted from the Istio docs'
+  # Prometheus Operator integration.
+  additionalServiceMonitors:
+    - name: istio-component-monitor
+      jobLabel: istio
+      targetLabels: [app]
+      selector:
+        matchExpressions:
+          - { key: istio, operator: In, values: [pilot] }
+      namespaceSelector:
+        any: true
+      endpoints:
+        - port: http-monitoring
+          interval: 15s
+
+  # Envoy sidecar metrics (data plane): every injected pod.
+  additionalPodMonitors:
+    - name: envoy-stats-monitor
+      jobLabel: envoy-stats
+      selector:
+        matchExpressions:
+          - { key: istio-prometheus-ignore, operator: DoesNotExist }
+      namespaceSelector:
+        any: true
+      podMetricsEndpoints:
+        - path: /stats/prometheus
+          interval: 15s
+          relabelings:
+            - action: keep
+              sourceLabels: [__meta_kubernetes_pod_container_name]
+              regex: "istio-proxy"
+            - action: keep
+              sourceLabels: [__meta_kubernetes_pod_annotationpresent_prometheus_io_scrape]
+            - action: replace
+              regex: (\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+              replacement: "[$2]:$1"
+              sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+              targetLabel: __address__
+            - action: replace
+              regex: (\d+);((([0-9]+?)(\.|$)){4})
+              replacement: "$2:$1"
+              sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+              targetLabel: __address__
+            - action: labeldrop
+              regex: "__meta_kubernetes_pod_label_(.+)"
+            - sourceLabels: [__meta_kubernetes_namespace]
+              action: replace
+              targetLabel: namespace
+            - sourceLabels: [__meta_kubernetes_pod_name]
+              action: replace
+              targetLabel: pod_name
