@@ -48,12 +48,78 @@ HTTP client or in a shared client library. Across 50 microservices:
 ## Part 2 - Onboarding
 
 **Q2.1**
+`catalog-v1` now has:
+- init containers: `istio-init`, and `istio-proxy` with `restartPolicy: Always`;
+- containers: `catalog` only.
+
+`istio-init` runs once and writes iptables rules so all pod traffic goes through Envoy (ports
+15001 outbound and 15006 inbound). `istio-proxy` is the Envoy sidecar, run by `pilot-agent`.
+
+The mechanism is a mutating admission webhook. istiod registers `istio-sidecar-injector`, whose
+`namespace.sidecar-injector.istio.io` webhook matches namespaces labelled `istio-injection=enabled`.
+The API server sends each new pod spec to istiod, which adds the containers before the pod is stored.
+That's why the chart is unchanged, and why a `rollout restart` was needed: existing pods are never
+changed.
+
+`istio-proxy` is an init container because it is a Kubernetes **native sidecar**. It starts and
+must be ready before the app container, so the app's first outbound calls work. It runs for the
+pod's whole life and is stopped after the app on shutdown, so Jobs can complete. This avoids the
+startup and shutdown races of the old two-regular-containers setup. It still counts in READY (2/2).
 
 **Q2.2**
+Yes. The intruder still gets HTTP 200 from payments (`caller_identity: null`) and can still
+`INCR` Redis. Istio's default mTLS mode is **PERMISSIVE**: each sidecar accepts both mTLS and
+plaintext. `istioctl x describe pod` shows "Workload mTLS mode: PERMISSIVE", and no
+PeerAuthentication or AuthorizationPolicy exists yet. Onboarding adds encryption where both sides
+support it but enforces nothing.
+
+(Test artifact: `printf ... | nc -w 2` now returns nothing, because the sidecar drops a connection
+whose client closes the moment it has sent. With stdin held open, `(printf 'INCR hacked\r\n'; sleep 3) | nc ...`
+still returns `:1`. The counter restarted because Redis was restarted and keeps no data on disk.)
+
+Gateway → catalog **is encrypted**. Both pods have sidecars, so the gateway's Envoy uses
+**auto-mTLS** and opens an Istio mTLS connection. Evidence:
+- `caller_identity` is now filled in; it comes from the client certificate, which only exists over mTLS;
+- catalog's sidecar access log shows the requested server name `outbound_.8080_._.catalog.shop.svc.cluster.local`
+  (Istio mTLS SNI), while the intruder's plaintext request in payments' log shows `-`;
+- `istioctl proxy-config cluster deploy/gateway-v1 --fqdn catalog.shop.svc.cluster.local -o json`
+  shows the transport socket matched on `tlsMode: istio`;
+- Kiali shows a padlock on the edge (Part 3).
 
 **Q2.3**
+- Part 1: `null`.
+- Now: catalog sees `spiffe://cluster.local/ns/shop/sa/gateway`, and inventory sees `spiffe://cluster.local/ns/shop/sa/catalog`.
+
+The server-side Envoy completes the mTLS handshake. It then adds an `X-Forwarded-Client-Cert` header
+with the client certificate's URI SAN to the request it passes to the app, and `app.py` reads the
+`URI=` field. The certificate is issued by istiod's CA to each sidecar over SDS, based on the pod's
+ServiceAccount token, and rotated automatically (24h TTL).
+
+The format is a SPIFFE ID, `spiffe://<trust-domain>/ns/<namespace>/sa/<serviceaccount>`. The
+identity belongs to the **ServiceAccount**, not to the pod, its IP or its labels.
 
 **Q2.4**
+`base` holds the cluster-wide pieces: the Istio CRDs, cluster roles and the default validating
+webhook (`defaultRevision`). `istiod` is the control plane. It watches those CRDs, so they must
+exist first. Their lifecycles also differ: CRDs are cluster-scoped and installed once, and they
+are shared by every istiod revision, while control planes can run side by side and come and go.
+
+They must share one version because CRD schemas, istiod and the proxies are released and tested
+together. If base is older, istiod may write fields the CRDs don't know, and the validation webhook
+may reject valid config. Mixed versions are unsupported. On upgrade, `base` goes first, since newer
+CRDs are backward compatible.
+
+Canary upgrade to the next minor version:
+1. Upgrade `istio-base`.
+2. Install a second control plane, e.g. `helm install istiod-1-32 istio/istiod --set revision=1-32`, next to the current one.
+3. Use **revision tags**: `prod-stable` → old revision, `prod-canary` → new revision. Namespaces are
+   labelled `istio.io/rev=prod-stable` instead of `istio-injection=enabled`.
+4. Move a few namespaces to `prod-canary` and restart them, then watch errors and latency.
+5. Point `prod-stable` at the new revision and restart the remaining namespaces gradually.
+6. Remove the old istiod once no proxy uses it. To roll back, point the tag back and restart.
+
+Proxies only change version when pods restart, so the pace is controlled one namespace at a time,
+and namespace labels never need editing.
 
 ## Part 3 - Observability
 
