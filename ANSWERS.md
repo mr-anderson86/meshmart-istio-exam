@@ -124,10 +124,41 @@ and namespace labels never need editing.
 ## Part 3 - Observability
 
 **Q3.1**
+Every edge between workloads in `shop` has a padlock: gateway → catalog/orders, catalog → inventory,
+orders → payments, and orders → redis (TCP). Both ends have a sidecar, so the client Envoy uses
+auto-mTLS with istiod-issued certificates.
+
+The only edge without one is `unknown → gateway`: the browser or `load.sh` coming in through the
+NodePort. The caller is outside the mesh, with no sidecar and no certificate, so it can only send
+plaintext. The gateway's sidecar accepts it because the namespace is still PERMISSIVE. Kiali shows
+the source as `unknown` because no sidecar on the client side reports its identity.
 
 **Q3.2**
+About **30%** (Kiali: 29.97% inbound 5xx; Prometheus: 30.0% over 5m), matching `failRate: 0.3`.
+
+The numbers come from the **Envoy sidecars**, not the app. Every sidecar records Istio's standard
+metrics (`istio_requests_total`, `istio_request_duration_milliseconds`, `istio_tcp_*`) for each
+request it handles, labelled with source and destination workload, identity and response code. Both
+the client (`reporter="source"`) and server (`reporter="destination"`) proxies report.
+
+Envoy exposes them on `:15020/stats/prometheus`, Prometheus scrapes them through the PodMonitor, and
+Kiali and Grafana query Prometheus. Payments' sidecar shows `response_code="500"` 1518 vs `"200"`
+3485 from `orders-v1`. No code changes were needed.
 
 **Q3.3**
+Target health shows one `envoy-stats-monitor` target per meshed pod, all `UP`, scraped at
+`http://<podIP>:15020/stats/prometheus`. The discovered `__address__` is `<podIP>:15090`, the only
+port `istio-proxy` declares (`http-envoy-prom`). It serves Envoy's stats only.
+
+15020 is pilot-agent's **merged** endpoint: Envoy stats plus `istio_agent_*` plus the application's
+own metrics. With Istio's metrics merging (`enablePrometheusMerge`, default on), the injector sets
+`prometheus.io/scrape|port|path=true|15020|/stats/prometheus` on the pod, moves any app annotations
+into `ISTIO_PROMETHEUS_ANNOTATIONS`, and pilot-agent scrapes and merges the app. That gives one target
+per pod, and it still works under STRICT mTLS, where Prometheus can't reach the app port directly.
+
+15020 is never a declared container port, so a port-name endpoint can't select it. The relabeling
+keeps only the `istio-proxy` container and pods with `prometheus.io/scrape`, then builds
+`__address__` from pod IP + `prometheus.io/port`, with an IPv6 variant using `[ip]:port`.
 
 ## Part 4 - Zero trust
 
