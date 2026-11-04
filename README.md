@@ -133,7 +133,8 @@ kubectl apply -f tools/intruder.yaml
 
 # Can a random pod in another namespace reach payments and the datastore?
 kubectl -n intruder exec intruder -c shell -- curl -s -w '\nHTTP %{http_code}\n' http://payments.shop:8080/charge
-kubectl -n intruder exec intruder -c shell -- sh -c "printf 'INCR hacked\r\n' | nc -w 2 redis.shop 6379"
+# (the sleep keeps the connection open long enough to read Redis's reply)
+kubectl -n intruder exec intruder -c shell -- sh -c "(printf 'INCR hacked\r\n'; sleep 2) | nc -w 3 redis.shop 6379"
 
 tools/load.sh /api/catalog 50
 tools/load.sh /api/orders 50

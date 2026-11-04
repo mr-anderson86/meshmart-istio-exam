@@ -28,7 +28,10 @@ if kubectl -n intruder get pod intruder >/dev/null 2>&1; then
     200|500) ko "intruder reached payments over HTTP (got $c)";;
     *)       ok "intruder blocked from payments (got '${c:-nothing}')";;
   esac
-  r=$(kubectl -n intruder exec intruder -c shell -- sh -c "printf 'PING\r\n' | nc -w 2 redis.shop 6379" 2>/dev/null || true)
+  # Keep stdin open for 2s: if nc closes its side right after sending, the
+  # sidecar in front of redis drops the connection and we would see no reply
+  # even when redis IS reachable (a false PASS).
+  r=$(kubectl -n intruder exec intruder -c shell -- sh -c "(printf 'PING\r\n'; sleep 2) | nc -w 3 redis.shop 6379" 2>/dev/null || true)
   if printf '%s' "$r" | grep -q PONG; then ko "intruder talked to redis (got PONG)"; else ok "intruder blocked from redis"; fi
 else
   echo "  SKIP  intruder pod not found (kubectl apply -f tools/intruder.yaml)"
