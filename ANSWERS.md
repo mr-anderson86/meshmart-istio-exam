@@ -272,6 +272,29 @@ the Redis args are hard-coded in `templates/redis.yaml` today. Two options:
 
 Istio controls who connects; Redis controls what they may run.
 
+**Q4.5**
+Yes: `curl localhost:9000/charge` returns 200 with `caller_identity: null`, and payments' sidecar
+logs nothing for it. Port-forward doesn't go over the pod network: kubectl → API server → kubelet,
+which opens the connection **inside the pod's network namespace to 127.0.0.1:8080**. Istio's iptables
+only redirect traffic arriving on the pod's interface to Envoy (port 15006), so this connection goes
+straight to the app and skips the sidecar entirely: no mTLS, no PeerAuthentication, no
+AuthorizationPolicy. (`svc/payments` just picks a pod; no Service routing is involved.)
+
+This is also why Part 4 behaves differently over port-forward: forwarding to the gateway bypasses its
+sidecar, so STRICT would not have broken the UI.
+
+The only check is Kubernetes RBAC on `create pods/portforward`. That permission is effectively a
+bypass around every mesh policy in the namespace, so it should be treated like admin: only
+break-glass or on-call operators, time-limited, audited via API server audit logs, never CI or
+application service accounts in production. The same applies to `pods/exec`, `pods/attach` and
+`create pods`, since a new pod can run as any ServiceAccount in the namespace and take on its identity.
+
+RBAC is additive (there are no deny rules), and the built-in `edit` and `admin` ClusterRoles grant
+`pods/portforward`, `pods/exec` and `pods/attach`. So developers and CI shouldn't get `edit`, but a
+custom deploy role without those subresources, and port-forward should be a separate role bound only
+to an on-call group. Example implementation (not applied):
+[`examples/shop-roles.yaml`](examples/shop-roles.yaml).
+
 ## Part 5 - Traffic management
 
 **Q5.1**

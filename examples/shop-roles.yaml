@@ -1,0 +1,46 @@
+# Example only, NOT applied (the sre-oncall group comes from an identity provider that doesn't exist here).
+#
+# pods/portforward and pods/exec bypass every mesh policy (see Q4.5), and the built-in "edit" and
+# "admin" ClusterRoles grant both. RBAC can't deny, only grant, so the fix is to never grant them by
+# default: developers and CI get shop-deployer, and only on-call SREs get port-forward.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shop-deployer
+  namespace: shop
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  # deliberately no pods/portforward, pods/exec or pods/attach
+---
+# Break-glass: in production this binding would be created just-in-time and expire.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shop-breakglass-portforward
+  namespace: shop
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shop-breakglass-portforward
+  namespace: shop
+subjects:
+  - kind: Group
+    name: sre-oncall
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: shop-breakglass-portforward
+  apiGroup: rbac.authorization.k8s.io
