@@ -1,0 +1,20 @@
+# catalog -> inventory
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: inventory
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: inventory
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/shop/sa/catalog"]
+      to:
+        - operation:
+            ports: ["8080"]
+            methods: ["GET"]
+            paths: ["/stock"]

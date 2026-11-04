@@ -1,0 +1,8 @@
+# Default deny for shop: an empty spec matches nothing, so every request to every workload
+# is denied unless an ALLOW policy below matches it.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: shop
+spec: {}

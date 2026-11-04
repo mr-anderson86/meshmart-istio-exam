@@ -1,0 +1,20 @@
+# orders -> payments
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: payments
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: payments
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/shop/sa/orders"]
+      to:
+        - operation:
+            ports: ["8080"]
+            methods: ["GET"]
+            paths: ["/charge"]

@@ -185,6 +185,23 @@ call. The clean fix is an Istio ingress gateway that ends TLS at the edge (B3), 
 can go back to fully STRICT.
 
 **Q4.2**
+Policies: default deny ([`10-authz-deny-all.yaml`](istio/10-authz-deny-all.yaml)) plus one ALLOW per
+receiving workload ([`11`](istio/11-authz-gateway.yaml) to [`16`](istio/16-authz-redis.yaml)). Each
+allow names the caller's principal and the port, method and path it may use. The gateway allow has no
+principal because the browser has no identity.
+
+Istio's workload identity **is** the ServiceAccount: each sidecar's certificate carries
+`spiffe://cluster.local/ns/<ns>/sa/<sa>`, and that is what `source.principals` matches. Because
+every workload has its own SA, each caller has a distinct, cryptographically verified identity, so
+policies can express the matrix exactly: `sa/orders` may call payments, `sa/gateway` may not.
+
+If every pod used `default`, every caller in `shop` would present the same principal,
+`cluster.local/ns/shop/sa/default`. Policies couldn't tell callers apart. Allowing orders → payments
+would also allow gateway → payments, catalog → payments and so on, so the direct buttons couldn't be
+denied. The best you could do is "anything in `shop` may call anything in `shop`", namespace-level
+trust instead of least privilege. It also widens the blast radius: compromising any one pod gives an
+attacker the identity, and any Kubernetes RBAC rights, of all of them. (Per-version SAs aren't needed:
+catalog v1 and v2 share `sa/catalog` because they play the same role.)
 
 **Q4.3**
 

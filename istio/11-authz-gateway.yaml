@@ -1,0 +1,17 @@
+# Browser -> gateway. The browser is outside the mesh and has no identity, so no principal can be
+# required here: allow any source, but only read requests on the nginx port.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: gateway
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            ports: ["8080"]
+            methods: ["GET", "HEAD"]

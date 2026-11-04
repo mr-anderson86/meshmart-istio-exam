@@ -1,0 +1,19 @@
+# orders -> redis. Plain TCP: Istio can check the caller's identity and the port,
+# but not HTTP fields like methods or paths (see Q4.4).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: redis
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/shop/sa/orders"]
+      to:
+        - operation:
+            ports: ["6379"]

@@ -1,0 +1,20 @@
+# gateway -> orders
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: orders
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: orders
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/shop/sa/gateway"]
+      to:
+        - operation:
+            ports: ["8080"]
+            methods: ["GET"]
+            paths: ["/checkout"]
