@@ -163,6 +163,26 @@ keeps only the `istio-proxy` container and pods with `prometheus.io/scrape`, the
 ## Part 4 - Zero trust
 
 **Q4.1**
+With namespace-wide STRICT ([`00-peerauthentication.yaml`](istio/00-peerauthentication.yaml)), the UI
+broke: the browser and curl got an empty response (`HTTP 000`, `ERR_EMPTY_RESPONSE`). The browser is
+outside the mesh and can't present a mesh certificate, so it reaches the gateway over plaintext
+through the NodePort. The gateway's sidecar now accepts only mTLS and resets the connection: its
+access log shows `NR filter_chain_not_found`. The intruder gets the same result against payments,
+Redis and every other service, which is the point.
+
+Fix: a workload-scoped PeerAuthentication
+([`01-peerauthentication-gateway.yaml`](istio/01-peerauthentication-gateway.yaml)) selects
+`app=gateway`, keeps `mode: STRICT`, and sets `portLevelMtls` to `PERMISSIVE` for **container port
+8080 only** (the targetPort the sidecar sees, not Service port 80 or NodePort 30080). The most
+specific policy wins per workload, so only that one port on the gateway accepts plaintext. Every
+other workload keeps the namespace STRICT policy, which `istioctl x describe pod` confirms.
+PERMISSIVE rather than DISABLE keeps mTLS working for any future in-mesh caller, such as an ingress
+gateway.
+
+Trade-off: gateway:8080 accepts plaintext from any pod in the cluster, so the gateway can act on
+behalf of an un-meshed caller. Part 4.2's AuthorizationPolicies limit what the gateway itself may
+call. The clean fix is an Istio ingress gateway that ends TLS at the edge (B3), so the nginx gateway
+can go back to fully STRICT.
 
 **Q4.2**
 

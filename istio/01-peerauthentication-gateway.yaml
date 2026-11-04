@@ -1,0 +1,16 @@
+# Exception for the gateway only: the browser reaches it over the NodePort without a mesh certificate,
+# so container port 8080 must also accept plaintext. Every other port on the gateway stays STRICT.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: gateway-nodeport
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    8080:               # container port (targetPort), not the Service port 80
+      mode: PERMISSIVE

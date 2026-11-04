@@ -1,0 +1,9 @@
+# Namespace-wide STRICT mTLS for shop: sidecars accept only mTLS, plaintext is rejected.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: shop
+spec:
+  mtls:
+    mode: STRICT
