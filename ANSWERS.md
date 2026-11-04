@@ -204,6 +204,28 @@ attacker the identity, and any Kubernetes RBAC rights, of all of them. (Per-vers
 catalog v1 and v2 share `sa/catalog` because they play the same role.)
 
 **Q4.3**
+In 4.1 the intruder had no sidecar, so it spoke plaintext. Payments' and Redis's sidecars, under
+STRICT PeerAuthentication, reset the connection before any HTTP: curl got `HTTP 000` (exit 56), nc
+got nothing, and Envoy logged `NR filter_chain_not_found`. That's the **authentication / transport
+layer**.
+
+After joining the mesh, the intruder has a valid istiod-issued certificate for
+`spiffe://cluster.local/ns/intruder/sa/default`, so the mTLS handshake **succeeds**. It is now
+stopped by **authorization**: payments returns **`403 RBAC: access denied`**, logged as
+`rbac_access_denied_matched_policy[none]`, because default-deny is in place and no ALLOW rule lists
+`ns/intruder/sa/default`. For Redis (TCP) the same RBAC check runs in Envoy's network filter. With no
+HTTP there's no 403, so the connection is just closed after the handshake (empty reply, same log
+reason).
+
+| | **4.1**: intruder **not** in the mesh | **4.3**: intruder **in** the mesh |
+|---|---|---|
+| Payments | `HTTP 000`, connection reset | `HTTP 403 RBAC: access denied` |
+| Redis | Empty reply (connection reset) | Empty reply (connection closed after mTLS) |
+| Envoy reason | `NR filter_chain_not_found` | `rbac_access_denied_matched_policy[none]` |
+| Blocking layer | **Authentication, at TLS/L4:** PeerAuthentication STRICT, no client cert | **Authorization, at L7 (HTTP) or L4 (TCP):** AuthorizationPolicy, identity not allowed |
+
+The lesson: mTLS proves identity, but every meshed workload gets one, so authorization policies are
+what enforce least privilege.
 
 **Q4.4**
 
