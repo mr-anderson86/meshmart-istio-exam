@@ -228,6 +228,49 @@ The lesson: mTLS proves identity, but every meshed workload gets one, so authori
 what enforce least privilege.
 
 **Q4.4**
+No. Istio only parses HTTP/gRPC. Redis's RESP is treated as opaque TCP, so an AuthorizationPolicy
+for Redis can only match L4 attributes: source principal, namespace or IP, and destination port.
+HTTP-only fields like `methods` or `paths` don't apply; Istio drops such an ALLOW rule or widens a
+DENY rule rather than inspecting commands. `INCR` and `FLUSHALL` are just bytes in the stream.
+
+What Istio *can* enforce is already in place: only `cluster.local/ns/shop/sa/orders` may connect to
+Redis on 6379 ([`16-authz-redis.yaml`](istio/16-authz-redis.yaml)). Once connected, orders could
+still send any command.
+
+Restricting *commands* must happen in Redis itself, with Redis 6+ ACLs. `app.py` sends no `AUTH`, so
+it runs as the built-in `default` user, which can be limited with
+`ACL SETUSER default on nopass -@all +incr +ping ~*` (`PING` is kept for the readiness probe).
+`FLUSHALL` then fails with `NOPERM`. If the app could send `AUTH`, a dedicated `orders` user with a
+password from a Secret would be better.
+
+Verified at runtime (not persisted: this Redis has no ACL file and runs with `--save ""`, so the rule
+is lost when the pod restarts):
+
+```console
+$ kubectl -n shop exec deploy/redis-v1 -c redis -- redis-cli ACL SETUSER default on nopass -@all +incr +ping '~*'
+OK
+
+$ kubectl -n shop exec deploy/orders-v1 -c orders -- sh -c "(printf 'INCR orders-test\r\n'; sleep 2) | nc -w 3 redis 6379"
+:1
+
+$ kubectl -n shop exec deploy/orders-v1 -c orders -- sh -c "(printf 'FLUSHALL\r\n'; sleep 2) | nc -w 3 redis 6379"
+-NOPERM User default has no permissions to run the 'flushall' command
+```
+
+Both commands from orders go through the mesh (orders' sidecar → mTLS → Redis's sidecar), so Istio
+allows the connection and the Redis ACL alone refuses `FLUSHALL`. The order counter survived and kept
+increasing. The same test from the intruder gets an empty reply: Istio closes the connection before
+Redis sees any command.
+
+In production I'd make this declarative in the Helm chart instead of a manual `ACL SETUSER`, since
+the Redis args are hard-coded in `templates/redis.yaml` today. Two options:
+- a value with the ACL rules themselves, e.g. `redis.aclRules: ["on", "nopass", "-@all", "+incr", "+ping", "~*"]`,
+  rendered into the Redis args as `--user default ...`;
+- a value like `redis.aclConfigMaps` naming ConfigMaps that contain `users.acl` files, mounted into
+  the pod and loaded with `--aclfile`. This scales better to several users, and passwords would come
+  from a Secret.
+
+Istio controls who connects; Redis controls what they may run.
 
 ## Part 5 - Traffic management
 
