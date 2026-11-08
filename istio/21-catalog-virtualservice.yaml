@@ -1,0 +1,20 @@
+# Canary: 90% of catalog traffic to v1, 10% to v2, independent of replica counts.
+# Applied by the caller's sidecar (the gateway's Envoy for requests from the UI).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: catalog
+  namespace: shop
+spec:
+  hosts:
+    - catalog.shop.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: catalog.shop.svc.cluster.local
+            subset: v1
+          weight: 90
+        - destination:
+            host: catalog.shop.svc.cluster.local
+            subset: v2
+          weight: 10

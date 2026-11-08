@@ -298,6 +298,23 @@ to an on-call group. Example implementation (not applied):
 ## Part 5 - Traffic management
 
 **Q5.1**
+Two resources:
+- A **DestinationRule** ([`20-catalog-destinationrule.yaml`](istio/20-catalog-destinationrule.yaml))
+  defines the subsets `v1` and `v2` of `catalog.shop.svc.cluster.local` by the `version` label. Each
+  subset becomes its own Envoy cluster (`outbound|8080|v1|catalog...`). It's also where
+  per-destination policy (load balancing, connection pool, outlier detection, TLS) would live. There's
+  no `tls` override, so auto-mTLS keeps working under STRICT.
+- A **VirtualService** ([`21-catalog-virtualservice.yaml`](istio/21-catalog-virtualservice.yaml))
+  holds the routing rule for requests addressed to the catalog host: weight 90 to subset `v1`, 10 to
+  `v2`. For each request Envoy does an independent weighted random pick, so the split no longer
+  depends on replica counts. 200 requests gave 182 v1 / 18 v2.
+
+The decision is made by the **caller's** sidecar: for UI traffic, the **gateway pod's Envoy**
+(outbound). It applies the VirtualService, picks the subset, load-balances to one pod and connects to
+that pod IP directly over mTLS. `istioctl proxy-config routes deploy/gateway-v1 --name 8080` shows the
+weighted clusters (90/10). Catalog's own sidecar only enforces inbound security and records telemetry.
+A caller without a sidecar wouldn't get the split at all; it would go through kube-proxy and get the
+~50/50 from Part 1.
 
 **Q5.2**
 
