@@ -388,6 +388,46 @@ reached the service (`connect-failure`, `refused-stream`), not `5xx`. Here, `5xx
 acceptable only because the demo's failures are simulated before any "charge" happens.
 
 **Q5.4**
+Files:
+- [`40-inventory-virtualservice.yaml`](istio/40-inventory-virtualservice.yaml) (final state): `timeout: 1s`
+  on calls to inventory.
+- [`experiments/inventory-fault.yaml`](istio/experiments/inventory-fault.yaml) (not applied by the
+  grader): the same VirtualService name with `fault.delay.fixedDelay: 4s` at 100%, plus the same
+  timeout. Istio doesn't reliably merge two VirtualServices for one host, so the two files share a
+  name and applying either one replaces the other.
+
+**Delay only (step 1):** *Browse catalog* returned **502 after ~3s**, not 4s. The inventory call shows
+`"status": 0, "ms": 3002, "error": "TimeoutError: timed out"`. Catalog's own code gave up first
+(`urlopen(..., timeout=3)` in app.py). `status 0` is the app's notation for "no HTTP response at all".
+Catalog's sidecar logged `0 DI,DC downstream_remote_disconnect ... 3006`, meaning delay injected and
+the catalog app hung up. **Inventory's sidecar logged nothing:** the request never left the catalog pod.
+
+**Delay + timeout (both applied):** exactly the same, **status 0 after ~3s**. The 1s timeout never
+fires, although `istioctl proxy-config routes <catalog-pod>` shows both `timeout: 1s` and
+`fixedDelay: 4s` on the inventory route. The Istio VirtualService reference documents this for
+`HTTPRoute.fault`: *"timeouts or retries will not be enabled when faults are enabled on the client
+side."* Inside Envoy, the fault step holds the request for 4s before it reaches the forwarding step,
+and the timeout timer belongs to the forwarding step. With sidecars, the fault and the timeout for one
+host always end up on the same route of the same (caller's) Envoy, so the fault can't be used to
+demonstrate this timeout.
+
+**Timeout with real slowness:** to see the timeout work, the fault was removed
+(`kubectl apply -f istio/40-inventory-virtualservice.yaml`) and inventory itself was made slow for
+one test (`kubectl set env deploy/inventory-v1 -n shop DELAY_MS=4000`, reverted afterwards to `0`, the
+chart's value):
+```
+{"target": "http://inventory:8080/stock", "status": 504, "ms": 1005, "error": "upstream request timeout"}
+502 in 1.011965s
+```
+Catalog's sidecar logged `504 UT response_timeout ... 1000`. Catalog now fails fast in **1s with a
+504** for its inventory call (the body is written by Envoy, not inventory) instead of waiting 3s.
+
+**Which Envoy:** **both are catalog's sidecar** (the caller, outbound), like every VirtualService
+rule. It injected the delay (`DI`) before anything was sent, and it runs the 1s timer and returns the
+504 (`UT`). Inventory's sidecar applies neither. It only sees the request if the delay lets it through.
+
+Final state: the fault is only in `istio/experiments/`. Inventory runs its original Helm ReplicaSet
+(`DELAY_MS=0`), `kubectl diff -f istio/` shows no drift, and `tools/check.sh` passes 9/9.
 
 ## Written questions
 

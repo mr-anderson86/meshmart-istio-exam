@@ -1,0 +1,23 @@
+# EXPERIMENT, not applied by the grader (kubectl apply -f istio/ is not recursive).
+# Delays 100% of requests to inventory by 4s. The delay is injected by the caller's Envoy
+# (catalog's sidecar), before the request ever leaves the catalog pod.
+# It replaces istio/40-inventory-virtualservice.yaml (same name), so it repeats the 1s timeout.
+# Undo: kubectl apply -f istio/40-inventory-virtualservice.yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: inventory
+  namespace: shop
+spec:
+  hosts:
+    - inventory.shop.svc.cluster.local
+  http:
+    - timeout: 1s
+      fault:
+        delay:
+          fixedDelay: 4s
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: inventory.shop.svc.cluster.local

@@ -1,0 +1,16 @@
+# Calls to inventory must answer within 1s, otherwise the caller's Envoy (catalog's sidecar)
+# gives up and returns 504, so catalog fails fast instead of waiting on its own 3s socket timeout.
+# Same name as istio/experiments/inventory-fault.yaml: applying either one replaces the other.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: inventory
+  namespace: shop
+spec:
+  hosts:
+    - inventory.shop.svc.cluster.local
+  http:
+    - timeout: 1s
+      route:
+        - destination:
+            host: inventory.shop.svc.cluster.local
