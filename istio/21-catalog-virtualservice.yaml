@@ -1,4 +1,6 @@
 # Canary: 90% of catalog traffic to v1, 10% to v2, independent of replica counts.
+# Requests carrying "x-canary: always" are pinned to v2. Routes are checked top to bottom
+# and the first match wins, so the header route must come before the weighted one.
 # Applied by the caller's sidecar (the gateway's Envoy for requests from the UI).
 apiVersion: networking.istio.io/v1
 kind: VirtualService
@@ -9,7 +11,17 @@ spec:
   hosts:
     - catalog.shop.svc.cluster.local
   http:
-    - route:
+    - name: canary-header
+      match:
+        - headers:
+            x-canary:
+              exact: always
+      route:
+        - destination:
+            host: catalog.shop.svc.cluster.local
+            subset: v2
+    - name: weighted-split
+      route:
         - destination:
             host: catalog.shop.svc.cluster.local
             subset: v1

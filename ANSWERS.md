@@ -317,6 +317,38 @@ A caller without a sidecar wouldn't get the split at all; it would go through ku
 ~50/50 from Part 1.
 
 **Q5.2**
+[`21-catalog-virtualservice.yaml`](istio/21-catalog-virtualservice.yaml) now has two HTTP routes,
+checked top to bottom (first match wins): `canary-header` matches `x-canary: exact: always` and sends
+100% to subset `v2`; everything else falls through to `weighted-split` (90/10). The header route must
+come first, or the catch-all split would take every request. Result: 20/20 v2 with the header, 191 v1 /
+9 v2 out of 200 without it. `istioctl proxy-config routes <gateway-pod> --name 8080 -o json` shows both
+routes in that order.
+
+Hop by hop:
+1. **Browser → gateway pod.** The UI's JavaScript adds `x-canary: always` to its request. The gateway's
+   inbound Envoy (port 8080, PERMISSIVE) passes the request to nginx unchanged; inbound sidecars don't
+   route between versions.
+2. **nginx → catalog.** nginx is a reverse proxy and by default copies the client's request headers
+   onto the upstream request (only `Host` and, in this config, `Connection` are rewritten), so its new
+   request to `catalog:8080/products` still carries `x-canary`.
+3. **Gateway's outbound Envoy.** iptables sends nginx's outgoing request through the gateway pod's own
+   sidecar. **This is where routing happens**: that Envoy evaluates the catalog VirtualService, sees the
+   header, and picks a v2 pod. Catalog's sidecar only receives the result.
+
+**catalog → inventory.** This hop is a brand-new HTTP request that the catalog *application* builds.
+Envoy can't carry headers over from the inbound request: it sees two separate connections and doesn't
+know which outgoing call was triggered by which incoming request. Only the app knows, which is why
+`app.py` copies the `PROPAGATE` list (`x-canary`, `x-request-id`, `traceparent`, `b3` ...) onto its
+downstream calls. If it didn't:
+- Catalog's outbound Envoy would see an inventory request **without** `x-canary`. Today nothing breaks,
+  because inventory has only v1 and no VirtualService. But once inventory gets its own canary with the
+  same header rule, a tester would get catalog v2 with inventory **v1** (from the default split). That's
+  a mixed version path, so the test isn't really exercising v2 end to end.
+- For the same reason, distributed tracing would break: without `traceparent`/`b3`/`x-request-id` each
+  hop would start a new trace, instead of one trace across gateway → catalog → inventory.
+
+Header-based routing (and tracing) in a mesh only works end to end if every service in the chain
+propagates the headers. The sidecar does the routing, but it relies on the app to pass the context on.
 
 **Q5.3**
 
