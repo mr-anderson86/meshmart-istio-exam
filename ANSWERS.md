@@ -351,6 +351,43 @@ Header-based routing (and tracing) in a mesh only works end to end if every serv
 propagates the headers. The sidecar does the routing, but it relies on the app to pass the context on.
 
 **Q5.3**
+**Where:** in a VirtualService for the payments host,
+[`30-payments-virtualservice.yaml`](istio/30-payments-virtualservice.yaml). Like all VirtualService
+rules, it is executed by the **caller's** sidecar: the **orders pod's outbound Envoy** retries, and
+neither the orders app nor payments is changed. The orders app only sees the final response.
+
+**Conditions:**
+- `retryOn: 5xx,reset,connect-failure`: retry on any 5xx response, on a connection reset, or when the
+  connection can't be opened.
+  - `5xx` is the one that matters here. Istio's default retry policy doesn't cover a plain HTTP 500,
+    which is what payments returns, so without it the baseline stays at ~70%.
+- `attempts: 3`: up to 4 tries in total. An order fails only if all 4 fail: 0.3⁴ ≈ 0.8%.
+- `perTryTimeout: 1s`: a hung attempt is abandoned after 1s and retried, so a stuck call can't use up
+  the app's own 3s timeout.
+
+**Result:** before, `tools/load.sh /api/orders 100 5` gave 70 × 200 / 30 × 502. After: 100/100, and
+297/300 in a longer run (1%, as expected). Orders' Envoy counters
+(`kubectl exec deploy/orders-v1 -c istio-proxy -- pilot-agent request GET clusters`, payments cluster)
+show the hidden work: over 100 orders, `rq_total` went up by **140** and `rq_error` by **40**. Payments
+failed 40 attempts, Envoy retried each one, and all 100 orders succeeded.
+
+**The danger:** a retry is safe only if doing the operation twice has the same effect as doing it once
+(idempotent). A charge isn't, by default:
+- A 500 or a timeout doesn't mean "nothing happened". Payments may have charged the card and then
+  failed while writing the response, or answered after `perTryTimeout` expired. Envoy can't tell the
+  difference and retries, so the customer is **charged twice** (or up to 4 times here).
+- Retries also multiply load. If payments is failing because it's overloaded, up to 4× the requests
+  make it worse (a retry storm). Retries at several layers multiply each other.
+
+**What payments must guarantee:** **idempotency**. The client sends a unique **idempotency key** per
+logical payment (for example the order ID, in a header such as `Idempotency-Key`), and payments stores
+the key with the result. A repeated request with the same key returns the stored result instead of
+charging again. That also requires the key to be propagated on every hop, like `x-canary`. Without
+that guarantee, retries on a charge should be limited to failures where the request certainly never
+reached the service (`connect-failure`, `refused-stream`), not `5xx`. Here, `5xx` retries are
+acceptable only because the demo's failures are simulated before any "charge" happens.
+
+**Q5.4**
 
 ## Written questions
 

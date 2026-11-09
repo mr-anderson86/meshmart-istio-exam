@@ -1,0 +1,20 @@
+# Retries for orders -> payments, done by the orders pod's Envoy (the caller). Payments is untouched.
+# 3 retries = up to 4 attempts: with ~30% failures, all 4 fail only 0.3^4 ~ 0.8% of the time.
+# Istio's default retries don't cover a plain HTTP 500, so retryOn must name 5xx explicitly.
+# Caution: /charge is a charge. Retrying it is only safe if payments is idempotent (see Q5.3).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: payments
+  namespace: shop
+spec:
+  hosts:
+    - payments.shop.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: payments.shop.svc.cluster.local
+      retries:
+        attempts: 3
+        perTryTimeout: 1s
+        retryOn: 5xx,reset,connect-failure
