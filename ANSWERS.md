@@ -469,6 +469,44 @@ The istiod chart supports all three. This lab runs a single replica with no PDB 
 draining that one node is enough to cause exactly this scenario.
 
 **W2**
+The end state is one line (a `PeerAuthentication` with `mode: STRICT`, plus documented exceptions
+like the gateway's port-level PERMISSIVE in 4.1). The risk is in the switch itself. STRICT only changes
+the **receiver**: callers with a sidecar already send mTLS in PERMISSIVE (auto-mTLS) and don't notice,
+but any caller that can't do mTLS is cut off the moment the policy lands. With 50 services you have
+to find those callers first:
+- pods in non-injected namespaces or opted out with `sidecar.istio.io/inject: "false"`
+- Jobs and CronJobs (they may run only weekly), `hostNetwork` pods, VMs, clients outside the cluster
+- traffic arriving over a NodePort or LoadBalancer with no ingress gateway (the browser → gateway case
+  in 4.1)
+- monitoring that scrapes application ports from outside the mesh
+- DestinationRules with `tls.mode: DISABLE`, which force plaintext even between two sidecars
+- the same applies to TCP services (databases, Redis), not only HTTP
+
+**Plan:**
+1. **Measure while still PERMISSIVE.** Every Envoy labels incoming traffic with
+   `connection_security_policy` (`mutual_tls` or `none`). Per destination:
+   `sum by (source_workload, destination_workload, connection_security_policy)
+   (istio_requests_total{reporter="destination"})`, plus `istio_tcp_connections_opened_total` for TCP.
+   Each `none` row is a caller STRICT would break. In this lab, the query shows every internal edge as
+   `mutual_tls` and only `unknown -> gateway-v1 none` (the browser), which is exactly what broke in
+   4.1. Kiali shows the same thing: no padlock on an edge means plaintext. Look at a window long enough
+   to include batch jobs.
+2. **Fix the callers:** inject them, remove `tls: DISABLE`, put an ingress gateway in front of external
+   entry points. Repeat until each destination shows zero `none`.
+3. **Switch to STRICT step by step:** one low-risk workload (PA with a `selector`), then one namespace,
+   then the next, and mesh-wide (PA in `istio-system`) only at the end. Leave critical and
+   ingress-facing services for last.
+4. **Exceptions only where unavoidable:** use workload or port-level PERMISSIVE, documented, with an
+   owner and a plan to remove it.
+5. **Rollback is instant:** delete the PA or set it back to PERMISSIVE. Keep that ready for every
+   step.
+
+**What to watch after each step:**
+- `connection_security_policy="none"` stays at zero for the destinations just switched.
+- Destination error rate: 5xx, connection resets, Kiali edges turning red.
+- Envoy access logs with `NR filter_chain_not_found` (a plaintext connection refused, as seen in 4.1).
+- Errors reported by the **unmeshed callers**. Their failed connections never reach Istio's request
+  metrics, so check their own logs and alerts too.
 
 **W3**
 
