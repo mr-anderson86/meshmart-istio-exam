@@ -547,6 +547,105 @@ unless HTTP/1.0 support is explicitly enabled in Istio.
 clearing that header lets the connection to Envoy stay open (HTTP/1.1 keep-alive).
 
 **W4**
+**Resources.** Every pod runs a full Envoy next to the app:
+```
+$ kubectl top pod -n shop --containers
+POD            NAME          CPU   MEMORY
+catalog-v1     catalog       1m    32Mi      istio-proxy  4m   48Mi
+inventory-v1   inventory     1m    15Mi      istio-proxy  4m   47Mi
+orders-v1      orders        1m    16Mi      istio-proxy  3m   46Mi
+gateway-v1     nginx         1m    17Mi      istio-proxy  3m   49Mi
+payments-v1    payments      1m    14Mi      istio-proxy  3m   120Mi
+redis-v1       redis         10m   38Mi      istio-proxy  3m   45Mi
+$ kubectl top pod -n istio-system
+istiod   3m   178Mi        kiali   2m   153Mi
+```
+- In every pod the sidecar uses more memory than the app itself (~3× for these small apps). Across 7
+  sidecars that's ~400Mi, against ~150Mi for all the apps together.
+- On top of that come the control plane and add-ons (istiod, Kiali, Prometheus).
+- Requests matter too. This lab lowered the sidecar request to `10m/40Mi` (`global.proxy.resources`), but
+  Istio's default is `100m/128Mi` **per pod**. The scheduler reserves that whether it's used or not:
+  ~100 cores and ~125Gi for proxies at 1000 pods.
+
+**Latency.** Every call crosses two Envoys (the caller's outbound and the receiver's inbound) plus an
+mTLS handshake and encryption. That's usually ~1–3 ms per hop. Measured here with 100 sequential
+requests each way:
+```
+P='import sys,time,statistics,urllib.request as u
+t=[]
+for _ in range(100):
+    s=time.perf_counter(); u.urlopen(sys.argv[1]).read(); t.append((time.perf_counter()-s)*1000)
+print(f"p50 {statistics.median(t):.1f}ms")'
+kubectl exec -n shop deploy/inventory-v1 -c inventory -- python3 -c "$P" http://localhost:8080/stock   # p50 0.4ms  (no sidecar in path)
+kubectl exec -n shop deploy/catalog-v1   -c catalog   -- python3 -c "$P" http://inventory:8080/stock   # p50 43.0ms (2 sidecars + mTLS)
+```
+The extra ~40 ms isn't Envoy processing time. Inventory's inbound access log shows where it comes from:
+```
+$ kubectl logs -n shop deploy/inventory-v1 -c istio-proxy --tail=3
+"GET /stock HTTP/1.1" 200 - via_upstream ... 0 176 40 0 ... inbound|8080|| 127.0.0.6:34793 ...
+```
+- Total duration 40 ms, but upstream service time (first bytes from the app) is **0 ms**: the app answers
+  instantly and the rest of the response arrives ~40 ms later.
+- The same upstream connection (`127.0.0.6:34793`) is reused for every request. Envoy keeps the connection
+  to the app open.
+- `app.py` writes the headers and the body as two separate small writes (`end_headers()`, then
+  `wfile.write(body)`). On a reused TCP connection, Nagle's algorithm holds back the second small segment
+  until the first is ACKed, and the receiver's delayed ACK waits ~40 ms.
+- Without the sidecar every request was a new connection, which ACKs immediately, so the problem never
+  showed. (The fix belongs in the app, e.g. one write or `TCP_NODELAY`, and app.py is off-limits here.)
+
+So the sidecar changes connection behaviour, and here it exposed a latent app issue that took
+access-log analysis to find. That's an operations cost as much as a latency one.
+
+**Operations.**
+- **Another layer to debug.** Envoy response flags, `istioctl proxy-config`, iptables redirection. In this
+  exam alone:
+  - STRICT broke the UI (`NR filter_chain_not_found`, 4.1)
+  - nginx's HTTP/1.0 was silently passed through as plaintext TCP (W3)
+  - a fault silently disabled the route timeout (5.4)
+  - port-forward bypasses every policy (4.5)
+  - `printf | nc` against Redis gave false results through the sidecar
+
+  The tools for this:
+  ```
+  istioctl proxy-config listeners|routes|clusters|secret <pod>     # what Envoy actually loaded
+  kubectl logs <pod> -c istio-proxy                               # flags: NR, UR, UT, DI, DC, URX ...
+  ```
+- **Upgrades restart every pod.** The proxy image is fixed at injection time, so a new Istio version only
+  reaches a workload when its pod is recreated. That needs revisions or canary upgrades for safety.
+  ```
+  $ kubectl get pods -n shop -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.spec.initContainers[?(@.name=="istio-proxy")].image}{"\n"}{end}'
+  catalog-v1-...  docker.io/istio/proxyv2:1.31.3        (one per pod)
+  $ istioctl version
+  control plane version: 1.31.3
+  data plane version: 1.31.3 (8 proxies)
+  ```
+- **The control plane becomes critical (W1).** Every proxy takes its config from istiod, and pod creation
+  in injected namespaces depends on its webhook:
+  ```
+  $ istioctl proxy-status            # every pod subscribed to istiod for CDS/LDS/EDS/RDS
+  $ kubectl get mutatingwebhookconfiguration istio-sidecar-injector -o jsonpath='{.webhooks[*].failurePolicy}'
+  Fail Fail Fail Fail
+  ```
+  One bad VirtualService or AuthorizationPolicy can break traffic mesh-wide.
+- **More API surface to learn and govern:** `kubectl get crd -o name | grep -c istio.io` gives **15**
+  CRDs.
+- **Pod lifecycle quirks:** startup ordering (the app must not call out before the proxy is ready), and
+  Jobs that never complete because the sidecar keeps running. Native sidecars (an init container with
+  `restartPolicy: Always`, used here) fix both, but only on recent Kubernetes.
+
+**When not to adopt a mesh:**
+- **A few services or a monolith.** The fixed costs above outweigh the benefits.
+- **No team to own it.** A mesh is a platform with upgrades, a CA, debugging and policy to maintain.
+- **No real need for what it offers.** If mTLS and identity, L7 traffic control and uniform telemetry
+  aren't actual requirements, simpler tools cover them: NetworkPolicy, TLS in the app or a library, a
+  cloud load balancer, retries in the HTTP client.
+- **Very latency-sensitive paths** (trading, real-time) or tight resource budgets (edge, small clusters).
+- **Mostly non-HTTP traffic** (databases, custom TCP). Istio is limited to L4 there; it couldn't restrict
+  Redis commands in 4.4.
+- **Middle ground:** Istio **ambient mode** replaces per-pod sidecars with a per-node L4 proxy (ztunnel)
+  plus optional per-service waypoint proxies for L7. That removes most of the per-pod resource cost and
+  the pod restarts on upgrade.
 
 **W5**
 
