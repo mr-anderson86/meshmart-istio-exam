@@ -509,6 +509,42 @@ to find those callers first:
   metrics, so check their own logs and alerts too.
 
 **W3**
+By default nginx's `proxy_pass` talks **HTTP/1.0** to its upstream. With a sidecar, that upstream is the
+gateway pod's own outbound Envoy, which only treats HTTP/1.1 and HTTP/2 as HTTP.
+
+The outbound listener on port 8080 uses `http_inspector` to look at the first bytes, then picks a filter
+chain (`istioctl proxy-config listeners <gateway-pod> --port 8080 -o json`):
+```
+{"match": {"applicationProtocols": ["http/1.1", "h2c"]}, "filters": ["http_connection_manager"]}
+defaultFilterChain: PassthroughFilterChain
+```
+Only `http/1.1` and `h2c` reach the HTTP connection manager, which is where VirtualService routing,
+retries, timeouts, mTLS identity, AuthorizationPolicy matching on HTTP fields and HTTP metrics live. An
+HTTP/1.0 request falls through to the **passthrough** chain. Envoy then forwards the raw bytes as TCP to
+the original IP, in **plaintext**.
+
+Tested from the nginx container (`kubectl exec deploy/gateway-v1 -c nginx -- curl --http1.0 / --http1.1
+http://catalog:8080/products`):
+```
+HTTP/1.0 request -> 000   (Recv failure: Connection reset by peer)
+HTTP/1.1 request -> 200
+```
+The gateway's Envoy logged the 1.0 attempt as plain TCP to the passthrough cluster, reset by the upstream:
+`"- - -" 0 UR ... PassthroughCluster ... 10.43.232.218:8080`. Catalog is STRICT, so the plaintext
+connection is reset. Without `proxy_http_version 1.1`, every UI request would fail with a 502.
+
+Under PERMISSIVE it would have looked fine, which is worse. Requests would arrive as anonymous plaintext
+TCP that bypasses the mesh entirely:
+- no canary or header routing (5.1/5.2)
+- no retries or timeouts (5.3/5.4)
+- no HTTP metrics or Kiali edges
+- no SPIFFE identity, so catalog's AuthorizationPolicy (principal `sa/gateway`) would deny it
+
+Even when Envoy does parse a request as HTTP/1.0, it rejects it by default with `426 Upgrade Required`,
+unless HTTP/1.0 support is explicitly enabled in Istio.
+
+`proxy_set_header Connection ""` goes with it: in HTTP/1.0 mode nginx sends `Connection: close`, and
+clearing that header lets the connection to Envoy stay open (HTTP/1.1 keep-alive).
 
 **W4**
 
