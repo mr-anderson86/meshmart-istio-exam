@@ -432,6 +432,41 @@ Final state: the fault is only in `istio/experiments/`. Inventory runs its origi
 ## Written questions
 
 **W1**
+**Roles.** `istiod` is the **control plane** and never handles a request. It has three jobs:
+- **Config server (xDS):** it watches the Kubernetes API (Services, endpoints, VirtualServices,
+  AuthorizationPolicies...), translates everything into Envoy config and pushes it to every sidecar.
+  `istioctl proxy-status` shows each pod subscribed to CDS/LDS/EDS/RDS.
+- **CA:** it signs each workload's SPIFFE certificate (pilot-agent sends a CSR, istiod returns the cert).
+- **Sidecar injector:** it's the mutating webhook that adds `istio-proxy` to new pods.
+
+**Envoy** is the **data plane**. Every request goes through it: mTLS, routing and weights, retries and
+timeouts, AuthorizationPolicy, and metrics.
+
+**istiod down for 10 minutes:**
+- **Existing traffic keeps working.** Each Envoy keeps its last config and its current certificate in
+  memory, so mTLS, routing, retries and authz carry on. What stops is **change**:
+  - new or edited VirtualServices and AuthorizationPolicies aren't pushed;
+  - neither are endpoint changes. A pod that dies or moves to a new IP stays in every sidecar's list,
+    and replacement pods are never added. Retries and outlier detection soften this, but the mesh
+    is working from a frozen copy of the config.
+- **New pods can't be created** in injected namespaces. The injector webhook here has
+  `failurePolicy: Fail`, so the API server rejects pod creation in `shop` while istiod is unreachable.
+  Scale-ups, rollouts and replacements for crashed or evicted pods all stall. A pod that was already
+  injected can't get its config or certificate either: its `istio-proxy` never gets ready, and as a
+  native sidecar it holds back the app container.
+- **Certificate rotation isn't affected.** Workload certs last 24h
+  (`istioctl proxy-config secret`: NOT BEFORE 2026-11-10T12:57, NOT AFTER 2026-11-11T12:59) and
+  pilot-agent renews them at about 50% of their lifetime. A missed renewal is retried while the current
+  cert stays valid for hours. mTLS only breaks if istiod stays down longer than the remaining validity.
+
+In production, `istiod` needs:
+- at least 2 replicas;
+- a PodDisruptionBudget, so planned drains never evict all replicas at once;
+- `topologySpreadConstraints` (or pod anti-affinity) across nodes and zones, so one node or zone failure
+  can't take every replica.
+
+The istiod chart supports all three. This lab runs a single replica with no PDB on a single node, so
+draining that one node is enough to cause exactly this scenario.
 
 **W2**
 
