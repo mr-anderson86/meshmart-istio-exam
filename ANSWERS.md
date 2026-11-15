@@ -653,6 +653,39 @@ access-log analysis to find. That's an operations cost as much as a latency one.
   the pod restarts on upgrade.
 
 **W5**
+The receiving workload's Envoy evaluates each request in this order:
+1. **CUSTOM:** if a CUSTOM policy matches and the external authorizer (an `extensionProvider` such as
+   OPA or oauth2-proxy) rejects it → **deny**.
+2. **DENY:** if any DENY policy matches → **deny**.
+3. If the workload has **no ALLOW policies at all** → **allow**.
+4. **ALLOW:** if any ALLOW policy matches → **allow**.
+5. Otherwise → **deny**.
+
+A deny always wins over an allow, so a DENY policy is a guardrail no ALLOW can override (e.g. "never
+from namespace `intruder`"). (AUDIT policies only mark requests for logging and don't affect the
+decision.)
+
+**One ALLOW policy, a request that matches no rule: denied.** As soon as one ALLOW policy applies to a
+workload, its default flips from "allow everything" (step 3) to "allow only what an ALLOW rule matches",
+and everything else falls to step 5. HTTP gets `403 RBAC: access denied`, and a TCP connection is
+closed.
+
+Shown with inventory, which has a single ALLOW rule (`sa/catalog`, GET, `/stock`, port 8080):
+```
+gateway -> inventory /stock    : RBAC: access denied 403     (wrong identity)
+catalog -> inventory /stock    : 200                         (matches the rule)
+catalog -> inventory /admin    : RBAC: access denied 403     (right identity, wrong path)
+```
+Inventory's sidecar logs both denials as `403 - rbac_access_denied_matched_policy[none]`. `[none]` means
+no policy matched, so this is the step-5 default deny, not an explicit DENY policy.
+
+That's also how [`10-authz-deny-all.yaml`](istio/10-authz-deny-all.yaml) works. `spec: {}` isn't a
+DENY policy but an **ALLOW policy with no rules**, which matches nothing.
+`istioctl x authz check deploy/inventory-v1 -n shop` lists it as `ALLOW deny-all.shop` next to
+`ALLOW inventory.shop`. Its only effect is to give every workload in `shop` at least one ALLOW policy,
+which turns on default-deny everywhere. The per-service ALLOWs (11–16) then open exactly the calls
+the app needs. A real `action: DENY` matching everything would block all traffic, and no ALLOW could
+reopen it.
 
 ## Bonus (list what you did and where it lives)
 
