@@ -562,6 +562,11 @@ istiod   3m   178Mi        kiali   2m   153Mi
 ```
 - In every pod the sidecar uses more memory than the app itself (~3× for these small apps). Across 7
   sidecars that's ~400Mi, against ~150Mi for all the apps together.
+- Payments' 120Mi isn't a heavier Envoy. In `/sys/fs/cgroup/memory.stat` its `anon` memory (~45MB) is
+  the same as every other sidecar. The extra ~78MB is page cache of the shared `envoy` and `pilot-agent`
+  binaries, which Linux bills to the first cgroup that loaded them: `file_mapped` is 45MB in payments
+  and 0 in orders. The real per-sidecar cost is ~45–50Mi. Per-container `kubectl top` can include
+  shared cache like this, but memory limits count it all the same.
 - On top of that come the control plane and add-ons (istiod, Kiali, Prometheus).
 - Requests matter too. This lab lowered the sidecar request to `10m/40Mi` (`global.proxy.resources`), but
   Istio's default is `100m/128Mi` **per pod**. The scheduler reserves that whether it's used or not:
