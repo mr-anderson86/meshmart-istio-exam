@@ -689,3 +689,51 @@ reopen it.
 
 ## Bonus (list what you did and where it lives)
 
+
+**B1 Circuit breaking**
+Lives in [`istio/experiments/payments-circuit-breaker.yaml`](istio/experiments/payments-circuit-breaker.yaml)
+(not in `istio/`, see below). It's a DestinationRule for payments, enforced by the **caller's Envoy**
+(the orders sidecar):
+- `connectionPool`: `tcp.maxConnections: 1`, `http.http1MaxPendingRequests: 1`. Requests beyond one active
+  plus one queued are rejected immediately.
+- `outlierDetection`: `consecutive5xxErrors: 3`, `interval: 5s`, `baseEjectionTime: 15s`,
+  `maxEjectionPercent: 100`. A pod that returns 3 consecutive 5xx is removed from the pool.
+
+`tools/load.sh /api/orders 200 20`, before and after applying it:
+```
+retries only:        199 × 200,   1 × 502
+with the breaker:      2 × 200, 198 × 502      (p50 58 ms vs 94 ms: failing fast)
+```
+Orders' access log (`kubectl logs deploy/orders-v1 -c istio-proxy | grep /charge | awk '{print $5,$6}' | sort | uniq -c`),
+one line per request with its final outcome:
+```
+ 201 200 -          successes (199 from the baseline run + 2)
+ 184 503 UH         no healthy upstream: the only payments pod was ejected
+  14 503 UO         upstream overflow: connection pool full, rejected without calling payments
+   1 500 URX        baseline: all 4 attempts failed, retry limit exceeded
+```
+Right after the burst, orders' Envoy reported the pod as ejected:
+`pilot-agent request GET clusters` → `payments...:8080::health_flags::/failed_outlier_check`. Payments'
+own sidecar log shows only `200` and `500` and **no 503 at all**: every `UO`/`UH` response was produced
+locally by orders' Envoy without contacting payments.
+
+**How retries and circuit breaking interact:**
+- **Retries add load to the breaker.** One order can be up to 4 attempts, and each attempt takes a slot in
+  the connection pool, so retries fill it sooner and cause more `UO`.
+- **Retried failures count toward ejection.** Every failed attempt counts as a 5xx for
+  `consecutive5xxErrors`. Retries to the same (only) pod reach 3 consecutive 5xx quickly, so the pod is
+  ejected sooner.
+- **After ejection, retries are useless.** With a single pod there's no other host to retry on, so every
+  attempt ends in `UH`. The breaker turned 99% success (retries alone) into 1%.
+- **Designed to complement each other with several replicas.** Istio's retries prefer a *different* host,
+  and outlier detection keeps a broken pod out of rotation, so the retry lands on a healthy one.
+  Outlier detection is meant to remove **one bad pod among many**. Applied to a single pod that is flaky
+  but alive, it causes a full outage for `baseEjectionTime`, which grows on each repeat ejection.
+- **In production:**
+  - run several replicas and keep `maxEjectionPercent` below 100;
+  - size the pool limits from measured capacity;
+  - cap concurrent retries mesh-wide with `connectionPool.http.maxRetries`, a retry budget against retry
+    storms.
+
+That's also why the file stays in `istio/experiments/`: in the final state it would keep ejecting the one
+payments pod and fail the resilience check. Undo: `kubectl delete -f istio/experiments/payments-circuit-breaker.yaml`.

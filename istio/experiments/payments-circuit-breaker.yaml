@@ -1,0 +1,25 @@
+# EXPERIMENT (bonus B1), not applied by the grader (kubectl apply -f istio/ is not recursive).
+# Circuit breaking for payments, enforced by the caller's Envoy (the orders sidecar).
+# The limits are deliberately tiny so `tools/load.sh /api/orders 200 20` trips them.
+# Kept out of istio/ because with a single payments pod failing ~30% by design, outlier detection
+# would keep ejecting it and break the resilience check.
+# Undo: kubectl delete -f istio/experiments/payments-circuit-breaker.yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: payments
+  namespace: shop
+spec:
+  host: payments.shop.svc.cluster.local
+  trafficPolicy:
+    # No tls block: auto-mTLS keeps working under STRICT.
+    connectionPool:
+      tcp:
+        maxConnections: 1            # at most 1 open connection to payments
+      http:
+        http1MaxPendingRequests: 1   # at most 1 request queued; the rest get 503 UO
+    outlierDetection:
+      consecutive5xxErrors: 3        # 3 consecutive 5xx from the pod...
+      interval: 5s                   # ...checked every 5s...
+      baseEjectionTime: 15s          # ...ejects it for 15s (longer on repeat ejections)
+      maxEjectionPercent: 100        # allow ejecting the only pod (503 UH while ejected)
