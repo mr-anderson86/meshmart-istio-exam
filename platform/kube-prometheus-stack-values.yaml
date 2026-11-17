@@ -10,6 +10,42 @@ alertmanager:
 grafana:
   adminPassword: admin              # lab only
 
+  # Istio dashboards as code (bonus B2): downloaded from grafana.com by an init container on every
+  # start and loaded as provisioned (read-only) dashboards in an "Istio" folder.
+  # Revisions are pinned to the ones Istio published for 1.31.3 (the revision description on
+  # grafana.com names the Istio version). Bump them together with $ISTIO_VERSION; never use the
+  # latest revision, which belongs to whatever Istio release was published last (on any branch).
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: istio
+          folder: Istio
+          type: file
+          disableDeletion: true
+          editable: false
+          options:
+            path: /var/lib/grafana/dashboards/istio
+  dashboards:
+    istio:                          # must match the provider name above
+      istio-mesh:
+        gnetId: 7639
+        revision: 340               # Istio 1.31.3
+        datasource: &istioDatasource
+          - { name: DS_PROMETHEUS, value: Prometheus }
+      istio-service:
+        gnetId: 7636
+        revision: 339               # Istio 1.31.3
+        datasource: *istioDatasource
+      istio-workload:
+        gnetId: 7630
+        revision: 340               # Istio 1.31.3
+        datasource: *istioDatasource
+      istio-control-plane:
+        gnetId: 7645
+        revision: 339               # Istio 1.31.3
+        datasource: *istioDatasource
+
 # k3s (Rancher Desktop) runs these inside one binary, so their scrape
 # targets would just show as DOWN. Turn them off to keep the lab quiet.
 kubeControllerManager:

@@ -10,7 +10,15 @@ auth:
 external_services:
   prometheus:
     url: http://kps-prometheus.monitoring:9090
+  # Bonus B2: Kiali looks up the Istio dashboards in Grafana by title and shows
+  # "View in Grafana" links on service and workload pages.
   grafana:
-    enabled: false               # bonus B2 asks you to wire this up
+    enabled: true
+    internal_url: http://kps-grafana.monitoring:80   # used by the Kiali server to query Grafana
+    external_url: http://localhost:3000              # used in links for the browser (the README's port-forward)
+    auth:
+      type: basic
+      username: admin
+      password: admin            # lab only; in production use a Grafana viewer token from a Secret
   tracing:
     enabled: false

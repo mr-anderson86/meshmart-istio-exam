@@ -737,3 +737,60 @@ locally by orders' Envoy without contacting payments.
 
 That's also why the file stays in `istio/experiments/`: in the final state it would keep ejecting the one
 payments pod and fail the resilience check. Undo: `kubectl delete -f istio/experiments/payments-circuit-breaker.yaml`.
+
+**B2 Dashboards as code**
+Lives in [`platform/kube-prometheus-stack-values.yaml`](platform/kube-prometheus-stack-values.yaml) and
+[`platform/kiali-values.yaml`](platform/kiali-values.yaml).
+
+*Before:* the four dashboards were imported by hand in Part 3. Grafana listed them in `General` with
+`"provisioned": false`, stored only in Grafana's database, which in this chart is an `emptyDir`.
+Recreating the pod or starting a fresh cluster loses them, and nothing recorded which revision was
+imported.
+
+*Grafana:* under `grafana:` in the kps values:
+- `dashboardProviders` defines a file provider `istio` that loads `/var/lib/grafana/dashboards/istio` into a
+  read-only **Istio** folder.
+- `dashboards.istio` lists the four dashboards by `gnetId` with a **pinned `revision`**: 7639 → 340
+  (Mesh), 7636 → 339 (Service), 7630 → 340 (Workload), 7645 → 339 (Control Plane).
+- On every start, the chart's `download-dashboards` init container fetches
+  `https://grafana.com/api/dashboards/<id>/revisions/<rev>/download`.
+- `datasource: [{name: DS_PROMETHEUS, value: Prometheus}]` replaces the dashboards' `${DS_PROMETHEUS}`
+  input with kps's default datasource. The panels themselves use a `${datasource}` variable that
+  resolves to the default Prometheus.
+
+Verified with `helm template` against the installed chart versions before upgrading. After
+`helm upgrade kps ...`, the recreated Grafana pod came up with the **Istio** folder holding all four
+dashboards as provisioned, with data once traffic flows. With load running, the Service dashboard shows
+payments at ~8 req/s against ~5.7 req/s for orders: the extra requests are the 5.3 retries.
+
+*Kiali:* `external_services.grafana` is enabled with:
+- `internal_url: http://kps-grafana.monitoring:80`, used by the Kiali server to look up dashboards by
+  title;
+- `external_url: http://localhost:3000`, for the browser links (the README's port-forward);
+- basic auth (lab credentials, as with `adminPassword`; in production a Grafana viewer token from a
+  Secret).
+
+Kiali's service and workload pages then show **View in Grafana** links that open the matching Istio
+dashboard.
+
+**Keeping revisions in step with Istio upgrades.** Istio's release automation publishes a new revision
+of each dashboard for **every** Istio release, on every release branch, interleaved. On grafana.com, the
+revision description names the version:
+```
+rev 340  Istio Mesh Dashboard version 1.31.3      ← pinned (installed Istio)
+rev 344  Istio Mesh Dashboard version 1.31.4
+rev 345  Istio Mesh Dashboard version 1.30.8
+rev 347  Istio Mesh Dashboard version 1.32.0      ← "latest"
+```
+So the "latest" revision, which is what a manual import gives you, belongs to whichever Istio release
+was published last, here 1.32.0 against an installed 1.31.3. Leaving out `revision` is no better: the
+chart then downloads revision **1**. Dashboards query Istio metric names and labels, which can change
+between versions. How to keep them in step:
+- Pin the revisions whose description matches the installed Istio version (lookup:
+  `curl -s https://grafana.com/api/dashboards/<id>/revisions | jq '.items[] | {revision, description}'`).
+- Bump them **in the same change** that bumps `$ISTIO_VERSION` for `istio-base`/`istiod`, so Istio and
+  its dashboards upgrade as one reviewed unit (Renovate or a small CI script can propose the PR).
+- For clusters without internet access, or for an exact match: take the dashboard JSON from the Istio
+  repo at the release tag (`manifests/addons/dashboards/`) and ship it as ConfigMaps labelled
+  `grafana_dashboard: "1"`. The Grafana sidecar in this chart already watches that label in all
+  namespaces (`sidecar.dashboards.enabled: true`, `searchNamespace: ALL`).
