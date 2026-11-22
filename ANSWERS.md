@@ -794,3 +794,154 @@ between versions. How to keep them in step:
   repo at the release tag (`manifests/addons/dashboards/`) and ship it as ConfigMaps labelled
   `grafana_dashboard: "1"`. The Grafana sidecar in this chart already watches that label in all
   namespaces (`sidecar.dashboards.enabled: true`, `searchNamespace: ALL`).
+
+**B3 Istio ingress gateway**
+The files are [`platform/istio-ingressgateway-values.yaml`](platform/istio-ingressgateway-values.yaml) and
+[`istio/experiments/b3-ingress/`](istio/experiments/b3-ingress/):
+- [`00-gateway.yaml`](istio/experiments/b3-ingress/00-gateway.yaml)
+- [`01-virtualservice.yaml`](istio/experiments/b3-ingress/01-virtualservice.yaml)
+- [`02-peerauthentication-gateway.yaml`](istio/experiments/b3-ingress/02-peerauthentication-gateway.yaml)
+- [`03-authz-gateway.yaml`](istio/experiments/b3-ingress/03-authz-gateway.yaml)
+
+*Design:*
+- **Ingress gateway:** `istio/gateway` chart at the same `$ISTIO_VERSION` (1.31.3), release
+  `istio-ingressgateway` in namespace `istio-ingress`. The release name gives the pods the label
+  `istio: ingressgateway` and the ServiceAccount `istio-ingressgateway`, so the gateway's mesh identity
+  is `cluster.local/ns/istio-ingress/sa/istio-ingressgateway`.
+- **Traefik:** Rancher Desktop's Traefik already owns 80/443 through k3s ServiceLB, so the chart's
+  default `LoadBalancer` Service would stay `<pending>`. The values file switches it to a **NodePort
+  on 30081**, next to the old nginx NodePort 30080 (one replica and no HPA, sized for the lab). The
+  alternatives were to disable Traefik or to put Traefik in front of the ingress gateway.
+- **`Gateway` `meshmart`** (in `istio-ingress`): an HTTP listener on port 80 for pods labelled
+  `istio: ingressgateway`. `hosts: "shop/*"` lets only VirtualServices from namespace `shop` attach to
+  it.
+- **`VirtualService` `meshmart-edge`** (in `shop`): bound only to `istio-ingress/meshmart`, not to
+  `mesh`, so in-mesh traffic is unaffected. It routes everything to `gateway.shop:80`. nginx keeps
+  serving the UI and its `/api/*` mapping, and the ingress gateway becomes the new front door.
+- **02 and 03:** these use the **same names** as the graded
+  [`01-peerauthentication-gateway.yaml`](istio/01-peerauthentication-gateway.yaml) and
+  [`11-authz-gateway.yaml`](istio/11-authz-gateway.yaml), so applying them **replaces** the Q4.1
+  exception:
+  - nginx becomes plain STRICT, with no port-level PERMISSIVE;
+  - the only caller nginx accepts is the ingress gateway's principal, for GET/HEAD on 8080, instead of
+    "any source".
+- **Why `experiments/`:** the grader's cluster has no ingress gateway and `check.sh` tests `:30080`, so
+  these files stay outside the graded `istio/` folder.
+
+*Before vs after.* Solid arrows are traffic that's allowed. Dotted arrows marked ✗ are traffic that's
+blocked.
+
+*Before (Q4.1):* the browser's plaintext goes straight into an app pod through a PERMISSIVE hole.
+
+```mermaid
+flowchart LR
+  B([Browser]) -->|"NodePort 30080<br/>plaintext"| G
+  subgraph shop["namespace shop: STRICT"]
+    G["gateway (nginx)<br/>8080 PERMISSIVE<br/>AuthZ: allow ANY source"]
+    G -->|mTLS| C[catalog]
+    G -->|mTLS| O[orders]
+  end
+  X[intruder pod<br/>in mesh] -->|"mTLS: 200, gets in"| G
+```
+
+*After (B3):* plaintext ends at the edge proxy, and every hop inside the mesh is mTLS.
+
+```mermaid
+flowchart LR
+  T["Traefik keeps :80/:443<br/>(k3s ServiceLB)"] ~~~ B
+  B([Browser]) -->|"NodePort 30081<br/>HTTP"| IG
+  subgraph ingress["namespace istio-ingress"]
+    IG["istio-ingressgateway<br/>Gateway meshmart :80<br/>+ VS meshmart-edge"]
+  end
+  subgraph shop["namespace shop: STRICT, no exceptions"]
+    G["gateway (nginx)<br/>AuthZ: allow ONLY<br/>sa/istio-ingressgateway"]
+    G -->|mTLS| C[catalog]
+    G -->|mTLS| O[orders]
+  end
+  IG -->|"mTLS<br/>identity: istio-ingressgateway"| G
+  B2([Browser]) -. "NodePort 30080 plaintext<br/>✗ reset (000)" .-> G
+  X[intruder pod<br/>in mesh] -. "✗ 403 RBAC" .-> G
+```
+
+The Traefik box has no traffic arrow. It's there to show why the ingress gateway uses NodePort 30081
+instead of 80/443.
+
+*Commands, in order:*
+```bash
+# 0. Validate before touching the cluster: render the chart (labels, SA, NodePort 30081),
+#    check 30081 is free, dry-run the manifests, and lint the result with the existing config.
+helm template istio-ingressgateway istio/gateway --version 1.31.3 -n istio-ingress \
+  -f platform/istio-ingressgateway-values.yaml
+kubectl get svc -A -o jsonpath='{range .items[*]}{.spec.ports[*].nodePort}{"\n"}{end}' | grep 30081   # nothing
+kubectl apply --dry-run=server -f istio/experiments/b3-ingress/01-virtualservice.yaml \
+  -f istio/experiments/b3-ingress/02-peerauthentication-gateway.yaml -f istio/experiments/b3-ingress/03-authz-gateway.yaml
+kubectl apply --dry-run=client -f istio/experiments/b3-ingress/00-gateway.yaml   # namespace doesn't exist yet
+istioctl analyze -A istio/ istio/experiments/b3-ingress/                         # no issues
+
+# Stage 1: open the new door. The old door still works.
+#   Install the ingress gateway Deployment and Service (NodePort 30081) in istio-ingress.
+helm upgrade --install istio-ingressgateway istio/gateway --version 1.31.3 \
+  -n istio-ingress --create-namespace -f platform/istio-ingressgateway-values.yaml --wait
+#   Give it a listener (Gateway) and a route to nginx (VirtualService).
+kubectl apply -f istio/experiments/b3-ingress/00-gateway.yaml -f istio/experiments/b3-ingress/01-virtualservice.yaml
+curl -s -o /dev/null -w 'new door  :30081 -> %{http_code}\n' localhost:30081/api/catalog   # 200
+curl -s -o /dev/null -w 'old door  :30080 -> %{http_code}\n' localhost:30080/api/catalog   # 200
+
+# Stage 2: close the old door. nginx becomes fully STRICT and accepts only the ingress gateway's identity.
+kubectl apply -f istio/experiments/b3-ingress/02-peerauthentication-gateway.yaml \
+              -f istio/experiments/b3-ingress/03-authz-gateway.yaml
+curl -s -o /dev/null -w 'new door  :30081 -> %{http_code}\n' localhost:30081/api/catalog   # 200
+curl -s -o /dev/null -w 'old door  :30080 -> %{http_code}\n' localhost:30080/api/catalog   # 000
+kubectl exec -n intruder intruder -c shell -- curl -s -w ' %{http_code}\n' http://gateway.shop/api/catalog
+BASE_URL=http://localhost:30081 tools/check.sh
+
+# Undo: back to the graded final state. Re-applying istio/ restores the Q4.1 PeerAuthentication and
+# AuthorizationPolicy, since they have the same names. The ingress gateway can stay, and :30081 keeps
+# working because the Q4.1 policy allows any source on 8080.
+kubectl apply -f istio/
+tools/check.sh                                                                              # 9/9 on :30080
+```
+
+*Evidence:*
+- After stage 1, Kiali's versioned app graph for `shop` shows a new `istio-ingressgateway`
+  (`1.31.3:istio-ingress`) node feeding `gateway` → `catalog` → `inventory`. External traffic now
+  enters the mesh at a proxy that has an identity.
+- After stage 2:
+```
+new door  :30081 -> 200
+old door  :30080 -> 000                      # plaintext reset by STRICT (no client certificate)
+RBAC: access denied 403                      # intruder (in the mesh) -> gateway.shop
+BASE_URL=http://localhost:30081 tools/check.sh
+Result: 9 passed, 0 failed
+```
+- After the undo, `tools/check.sh` on `:30080` passed 9/9 again.
+
+*What you gain at the edge compared to Q4.1's fix:*
+- **No plaintext hole inside the mesh.** Q4.1 kept STRICT but punched a PERMISSIVE hole in port 8080 of
+  an application pod. Any pod in the cluster could talk plaintext to nginx. With an ingress gateway,
+  plaintext (or TLS from the browser) ends at a dedicated edge proxy, and every hop after it, from
+  ingress to nginx onwards, is mTLS. All of `shop` is STRICT with no exceptions.
+- **Authorization by identity at the front door.** In Q4.1 the browser had no identity, so the policy
+  on nginx had to allow "any source". Any meshed pod, the intruder included, could use nginx as a way
+  into the app. Now nginx allows exactly one principal, the ingress gateway, and the meshed intruder
+  gets `403`. External traffic arrives only through one controlled, audited path.
+- **Real edge features in Istio config:**
+  - TLS termination on the Gateway with a certificate Secret (for example from cert-manager), optionally
+    with mTLS from clients;
+  - host and SNI routing for several apps on one entry point;
+  - the 5.x VirtualService features (header and canary routing, retries, timeouts, fault injection,
+    mirroring) applied to browser traffic before it reaches nginx;
+  - `RequestAuthentication` with JWT validation and AuthorizationPolicy, plus rate limiting, at the
+    edge.
+  In the long run, nginx's routing role could move into the VirtualService.
+- **Telemetry for north-south traffic.** Requests from outside now show up in Istio metrics and access
+  logs with `source_workload="istio-ingressgateway"`, and Kiali draws the edge. In Q4.1 they arrived
+  as `unknown` plaintext.
+- **An edge that's operated separately.** The ingress gateway scales, upgrades and gets a PDB
+  independently of the app, and you can harden it on its own terms.
+
+What's left for production:
+- HTTPS on a 443 server, plus a real LoadBalancer or Traefik handing off to the gateway;
+- at least 2 replicas with HPA and PDB (the chart defaults);
+- `externalTrafficPolicy: Local` if the real client IP matters, since a NodePort with the default
+  `Cluster` policy SNATs it.

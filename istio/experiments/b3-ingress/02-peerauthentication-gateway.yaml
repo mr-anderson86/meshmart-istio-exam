@@ -1,0 +1,15 @@
+# EXPERIMENT (bonus B3). Same name as istio/01-peerauthentication-gateway.yaml, so applying this
+# replaces it: the port 8080 PERMISSIVE exception from 4.1 is gone and nginx is STRICT like every
+# other workload. Plaintext to the old NodePort 30080 is now refused.
+# Undo: kubectl apply -f istio/
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: gateway-nodeport
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  mtls:
+    mode: STRICT

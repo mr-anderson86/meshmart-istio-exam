@@ -1,0 +1,19 @@
+# EXPERIMENT (bonus B3), not applied by the grader. Needs the istio-ingressgateway release from
+# platform/istio-ingressgateway-values.yaml.
+# The listener on the ingress gateway: plain HTTP on port 80 (the Service exposes it as NodePort 30081).
+# "shop/*" lets only VirtualServices in namespace shop bind to it.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: meshmart
+  namespace: istio-ingress
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "shop/*"

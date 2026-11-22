@@ -1,0 +1,19 @@
+# EXPERIMENT (bonus B3). Routes everything arriving at the ingress gateway to nginx.
+# Bound only to the Gateway (not to "mesh"), so it doesn't affect in-mesh traffic.
+# nginx keeps doing the /api/* path mapping; the ingress gateway is just the new front door.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: meshmart-edge
+  namespace: shop
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - istio-ingress/meshmart
+  http:
+    - route:
+        - destination:
+            host: gateway.shop.svc.cluster.local
+            port:
+              number: 80

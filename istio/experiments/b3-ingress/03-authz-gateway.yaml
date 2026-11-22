@@ -1,0 +1,21 @@
+# EXPERIMENT (bonus B3). Same name as istio/11-authz-gateway.yaml, so applying this replaces it:
+# nginx accepts requests only from the ingress gateway's identity, instead of from anyone on 8080.
+# Undo: kubectl apply -f istio/
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: gateway
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/istio-ingress/sa/istio-ingressgateway"]
+      to:
+        - operation:
+            ports: ["8080"]
+            methods: ["GET", "HEAD"]

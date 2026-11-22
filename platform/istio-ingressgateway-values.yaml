@@ -1,0 +1,36 @@
+# Helm values for the Istio ingress gateway (bonus B3), same version as istio-base/istiod:
+#
+#   helm upgrade --install istio-ingressgateway istio/gateway --version "$ISTIO_VERSION" \
+#     -n istio-ingress --create-namespace -f platform/istio-ingressgateway-values.yaml --wait
+#
+# The release name gives the pods the labels app=istio-ingressgateway, istio=ingressgateway
+# (the Gateway resource selects on istio=ingressgateway) and the ServiceAccount
+# istio-ingressgateway, i.e. the SPIFFE identity
+# cluster.local/ns/istio-ingress/sa/istio-ingressgateway.
+
+# Rancher Desktop's Traefik already owns 80/443 through k3s ServiceLB, so a second LoadBalancer
+# on those ports would stay <pending>. Expose the gateway on a NodePort instead, next to the old
+# nginx NodePort (30080).
+service:
+  type: NodePort
+  ports:
+    - name: status-port
+      port: 15021
+      targetPort: 15021
+      protocol: TCP
+    - name: http2
+      port: 80
+      targetPort: 80
+      nodePort: 30081
+      protocol: TCP
+    # HTTPS would be a second port (443) plus a TLS server in the Gateway with a certificate
+    # Secret, e.g. issued by cert-manager.
+
+# Lab-sized: one replica, no HPA. In production keep autoscaling on, with minReplicas >= 2 and a PDB.
+autoscaling:
+  enabled: false
+replicaCount: 1
+resources:
+  requests:
+    cpu: 10m
+    memory: 40Mi
