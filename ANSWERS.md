@@ -982,6 +982,41 @@ Lives in [`platform/jaeger-values.yaml`](platform/jaeger-values.yaml) (new),
 - **nginx:** no change needed. `proxy_pass` forwards request headers by default, so the trace headers
   that nginx's sidecar adds reach orders unchanged.
 
+*How it fits together.* Arrows:
+- **Solid:** the user's request, carrying the trace headers from hop to hop.
+- **Dotted:** spans exported by each sidecar to Jaeger.
+- **Thick:** queries for traces.
+
+```mermaid
+flowchart LR
+  B([Browser]) -->|"no trace headers"| GS
+  subgraph shop["namespace shop (sampling 100%)"]
+    subgraph gw["gateway pod"]
+      GS["istio-proxy<br/>starts trace,<br/>adds traceparent"] --> NG["nginx<br/>proxy_pass keeps headers"]
+    end
+    subgraph od["orders pod"]
+      OS["istio-proxy"] --> OA["app.py<br/>copies PROPAGATE<br/>headers"]
+    end
+    subgraph pm["payments pod"]
+      PS["istio-proxy"] --> PA["app.py"]
+    end
+    NG -->|"traceparent"| OS
+    OA -->|"traceparent<br/>(retry by Envoy)"| PS
+  end
+  subgraph tracing["namespace tracing"]
+    J[("Jaeger all-in-one<br/>4317 OTLP · 16686 UI · 16685 gRPC<br/>in-memory")]
+  end
+  GS -.->|"spans"| J
+  OS -.->|"spans"| J
+  PS -.->|"spans"| J
+  K["Kiali<br/>Traces tab"] ==>|"gRPC :16685"| J
+  U([You]) ==>|"UI :16686<br/>port-forward"| J
+  I["istiod<br/>extensionProviders: jaeger<br/>defaultProviders: tracing"] -. "xDS config" .-> shop
+```
+
+The istiod → `shop` arrow is also dotted, but it carries configuration, not spans. It's how every
+sidecar learns where to send its spans and how many requests to sample.
+
 *Commands, in order:*
 ```bash
 # 0. Validate before touching the cluster.
