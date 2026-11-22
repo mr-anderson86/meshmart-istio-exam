@@ -945,3 +945,122 @@ What's left for production:
 - at least 2 replicas with HPA and PDB (the chart defaults);
 - `externalTrafficPolicy: Local` if the real client IP matters, since a NodePort with the default
   `Cluster` policy SNATs it.
+
+**B4 Distributed tracing**
+Lives in [`platform/jaeger-values.yaml`](platform/jaeger-values.yaml) (new),
+[`platform/istiod-values.yaml`](platform/istiod-values.yaml) and
+[`platform/kiali-values.yaml`](platform/kiali-values.yaml).
+
+*Design:*
+- **Jaeger:** chart `jaeger` **4.16.1** (Jaeger v2.22.0) from `https://jaegertracing.github.io/helm-charts`,
+  in namespace `tracing`. It runs all-in-one, with collector, query and UI in one pod, using the chart's
+  default in-memory storage, which is enough for a lab. Its Service `jaeger` exposes:
+  - 4317, OTLP gRPC, where the sidecars send spans;
+  - 16686, the UI;
+  - 16685, the gRPC query API used by Kiali.
+
+  The namespace isn't injected. Jaeger is infrastructure, like `monitoring`, and Envoy's own span
+  exports aren't intercepted by the mesh.
+- **Istio** (`meshConfig` in `istiod-values.yaml`):
+  - an `extensionProviders` entry `jaeger` of type `opentelemetry`, pointing at
+    `jaeger.tracing.svc.cluster.local:4317`;
+  - `defaultProviders.tracing: [jaeger]`, which turns it on for the whole mesh without a `Telemetry`
+    resource;
+  - `defaultConfig.tracing.sampling: 100`, so every request is traced in the lab. The default is 1%,
+    which makes a specific trace hard to find.
+
+  Istio 1.31.3 picks the sampling rate in this order: provider sampler, then `Telemetry`
+  `randomSamplingPercentage`, then `defaultConfig.tracing.sampling`, then `PILOT_TRACE_SAMPLING`. So the
+  values file is enough. The proxy reads its config when it starts, so pods need a restart to pick it up.
+- **One problem caught during validation:** once `defaultProviders` is set in the values, the istiod
+  chart **stops adding its own default `metrics: [prometheus]`**. The first render had no metrics
+  provider. Upgrading with it would have quietly emptied every Istio metric behind Prometheus, Grafana
+  (B2) and the Kiali graph. The values now list `metrics: [prometheus]` again, next to `tracing`.
+- **Kiali:** `external_services.tracing` is enabled with `provider: jaeger` and `use_grpc: true`:
+  - `internal_url: http://jaeger.tracing:16685`, which the Kiali server queries;
+  - `external_url: http://localhost:16686`, used for browser links.
+- **nginx:** no change needed. `proxy_pass` forwards request headers by default, so the trace headers
+  that nginx's sidecar adds reach orders unchanged.
+
+*Commands, in order:*
+```bash
+# 0. Validate before touching the cluster.
+helm pull jaeger --repo https://jaegertracing.github.io/helm-charts --version 4.16.1 --untar -d /tmp/jaeger-chart
+helm template jaeger /tmp/jaeger-chart/jaeger -n tracing -f platform/jaeger-values.yaml   # Service jaeger: 4317/16686/16685
+helm template istiod istio/istiod --version 1.31.3 -n istio-system -f platform/istiod-values.yaml \
+  -s templates/configmap.yaml                    # mesh config: metrics AND tracing providers, sampling 100
+helm template kiali-server kiali/kiali-server --version 2.34.1 -n istio-system -f platform/kiali-values.yaml
+istioctl analyze -A --meshConfigFile <rendered mesh config>                                # no new findings
+
+# 1. Install Jaeger: the backend that receives, stores, joins and shows the spans.
+helm upgrade --install jaeger jaeger --repo https://jaegertracing.github.io/helm-charts \
+  --version 4.16.1 -n tracing --create-namespace -f platform/jaeger-values.yaml --wait
+
+# 2. Point Istio at Jaeger. istiod pushes the provider to every sidecar over xDS, and restarting the
+#    shop pods makes their sidecars pick up sampling=100.
+helm upgrade istiod istio/istiod -n istio-system --version 1.31.3 -f platform/istiod-values.yaml --wait
+kubectl rollout restart deploy -n shop && kubectl rollout status deploy -n shop
+
+# 3. Connect Kiali to Jaeger: adds the Traces tab and the "View in Tracing" links.
+helm upgrade kiali-server kiali/kiali-server -n istio-system --version 2.34.1 -f platform/kiali-values.yaml --wait
+
+# 4. Generate order traffic (load.sh defaults to /api/catalog, which never reaches orders or payments)
+#    and open the UI.
+tools/load.sh /api/orders 20
+kubectl -n tracing port-forward svc/jaeger 16686:16686          # http://localhost:16686
+```
+
+*Evidence:*
+- Jaeger lists the services `gateway.shop`, `orders.shop`, `payments.shop`, `catalog.shop` and
+  `inventory.shop`. Istio names each one `<canonical app>.<namespace>`.
+- **One trace through gateway → orders → payments**, here trace `aa7e48c`: 6 spans, depth 5, 3
+  services, 68.9ms:
+```
+gateway.shop   server  gateway.shop.svc.cluster.local:80/*   200          nginx inbound: trace starts here
+gateway.shop   client  orders.shop.svc.cluster.local:8080/*  200          nginx -> orders
+orders.shop    server  orders.shop.svc.cluster.local:8080/*  200          orders inbound
+orders.shop    client  payments.shop.svc...:8080/*           200  23.6ms  ONE call made by app.py
+payments.shop  server  payments.shop.svc...:8080/*           500  769us   attempt 1, error
+payments.shop  server  payments.shop.svc...:8080/*           200  484us   retry, ~22ms later
+```
+  Each sidecar records a **server** span for the request coming in and a **client** span for the call
+  going out. This trace also makes the **Q5.3 retry visible inside a single request**. `app.py` called
+  payments once: there's one orders client span, and it ends with 200. Underneath it are **two**
+  payments server spans: 500, then 200. orders' Envoy made the retry, so the app never saw it. The
+  ~22ms gap between the attempts is Envoy's retry backoff (25ms base, with jitter).
+- A search for `payments.shop` + `error=true` found 8 traces in the run:
+  - seven with 6 spans and `payments.shop (2)`: one failure, then a successful retry;
+  - one with **7 spans, `Errors 2`, `payments.shop (3)`**: two failures before the third attempt
+    succeeded, which is the limit for `attempts: 3`.
+
+  The error traces cluster at 60–80ms on the scatter plot, which is the latency the backoff adds.
+- *A gotcha when searching:* every Jaeger filter (service, span name, attributes) must match **the same
+  span**. `gateway.shop` + `error=true` returns nothing, because the gateway's spans are all 200: the
+  retry hid the failure from them. Only the payments span has the error.
+- **Kiali:** Services → `orders` → **Traces** shows the same traces, with error traces in red and the
+  span breakdown in the tooltip. *View in Tracing* and the *Distributed Tracing* menu entry open the
+  Jaeger UI.
+
+*What Jaeger adds compared with Kiali and Prometheus:* the Kiali graph is built from `istio_requests_total`
+counters, one edge for each source → destination pair, summed over a time window. It shows that
+payments gets ~8 req/s against ~5.7 req/s for orders (B2), but not **which** request was retried or
+where **its** time went. A trace follows one request hop by hop. Istio produces the spans, and Jaeger
+receives them, joins them by trace ID, stores them and lets you search them. Kiali only displays them.
+
+**Why does the app have to forward trace headers itself?** Each Envoy sees only its own hop. orders'
+sidecar sees request A come in with trace ID `aa7e48c`, then a moment later sees `app.py` open a **new**
+HTTP request to payments. With many requests in flight at once, Envoy can't know which incoming request
+caused which outgoing call: the application is a black box to it. Only the application knows which
+request it's handling when it makes the call. So `app.py` copies the incoming trace headers onto every
+outgoing call. That's the `PROPAGATE` list: `traceparent`, `tracestate`, `x-b3-*`, `b3` and
+`x-request-id`. Without it, orders' outbound sidecar would see a call with no trace context and start
+a **new** trace. You'd get two disconnected traces, gateway → orders and orders → payments, instead of
+the single trace above. The same reasoning applies to `x-canary` in Q5.2: the mesh can only route on a
+header the app passed along. In real services an OpenTelemetry SDK or auto-instrumentation does the
+copying, but it still runs **inside the app**.
+
+*For production:*
+- persistent storage (Elasticsearch/OpenSearch or Cassandra through `userconfig`) instead of memory;
+- sampling at around 1%, or tail-based sampling in an OpenTelemetry Collector, instead of 100%;
+- resource limits and more than one replica for Jaeger;
+- for Kiali, auth instead of anonymous access.

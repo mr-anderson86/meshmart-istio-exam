@@ -1,0 +1,22 @@
+# Helm values for the Jaeger chart (bonus B4): Jaeger v2 all-in-one (collector + query + UI in
+# one pod) with the chart's default in-memory storage.
+#
+#   helm upgrade --install jaeger jaeger --repo https://jaegertracing.github.io/helm-charts \
+#     --version 4.16.1 -n tracing --create-namespace -f platform/jaeger-values.yaml --wait
+#
+# Service "jaeger" in "tracing" exposes, among others:
+#   4317   OTLP gRPC   <- Istio sidecars send spans here (meshConfig.extensionProviders in istiod-values.yaml)
+#   16686  UI          <- kubectl -n tracing port-forward svc/jaeger 16686:16686
+#   16685  gRPC query  <- Kiali (external_services.tracing in kiali-values.yaml)
+#
+# The namespace is not injected: Jaeger is infrastructure, like monitoring, and the sidecars' own
+# span exports are not intercepted by the mesh.
+#
+# Lab only: traces live in memory and are lost when the pod restarts. In production use
+# Elasticsearch/OpenSearch or Cassandra via userconfig (see the chart README), plus resources and replicas.
+
+jaeger:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi

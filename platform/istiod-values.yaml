@@ -17,6 +17,22 @@ pilot:
 meshConfig:
   accessLogFile: /dev/stdout        # Envoy access logs: kubectl logs <pod> -c istio-proxy
 
+  # Bonus B4: tracing. Every sidecar sends its spans over OTLP/gRPC to the Jaeger release from
+  # platform/jaeger-values.yaml (Service "jaeger" in namespace "tracing").
+  extensionProviders:
+    - name: jaeger
+      opentelemetry:
+        service: jaeger.tracing.svc.cluster.local
+        port: 4317
+  defaultProviders:
+    # Setting defaultProviders replaces the chart's default (metrics: [prometheus]), so it has to
+    # be listed again here, or the Istio metrics behind Prometheus, Grafana and Kiali disappear.
+    metrics: [prometheus]
+    tracing: [jaeger]               # mesh-wide, no Telemetry resource needed
+  defaultConfig:
+    tracing:
+      sampling: 100                 # lab: trace every request (default 1%). Read when a sidecar starts, so restart pods
+
 global:
   proxy:                            # every injected sidecar
     resources:

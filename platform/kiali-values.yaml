@@ -20,5 +20,11 @@ external_services:
       type: basic
       username: admin
       password: admin            # lab only; in production use a Grafana viewer token from a Secret
+  # Bonus B4: Kiali queries Jaeger (platform/jaeger-values.yaml) and shows a Traces tab on
+  # services and workloads, plus trace points on the latency charts.
   tracing:
-    enabled: false
+    enabled: true
+    provider: jaeger
+    use_grpc: true
+    internal_url: http://jaeger.tracing:16685        # Jaeger's gRPC query API, used by the Kiali server
+    external_url: http://localhost:16686             # Jaeger UI for browser links (kubectl -n tracing port-forward svc/jaeger 16686)
