@@ -1,0 +1,20 @@
+# EXPERIMENT (bonus B6 lab). Same name as istio/11-authz-gateway.yaml, so applying this replaces it.
+# The browser reaches nginx directly through the NodePort, so there's no waypoint in that path and
+# only ztunnel sees the traffic. ztunnel can't evaluate the L7 `methods: [GET, HEAD]` rule: with a
+# workload selector it would skip that rule, no ALLOW would ever match, and the UI would break.
+# So in ambient this policy is L4 only: any source, port 8080. The GET/HEAD restriction can only come
+# back with an ingress gateway or waypoint in front of nginx (see B3).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: gateway
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            ports: ["8080"]

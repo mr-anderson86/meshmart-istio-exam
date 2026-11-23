@@ -1,0 +1,12 @@
+# Helm values for the istio/ztunnel chart (bonus B6 lab): the per-node L4 proxy of ambient mode
+# (a DaemonSet, so one pod on this single-node cluster). It handles mTLS (HBONE on port 15008),
+# workload identity, L4 AuthorizationPolicies and TCP metrics for every ambient pod on its node.
+#
+#   helm upgrade --install ztunnel istio/ztunnel -n istio-system --version "$ISTIO_VERSION" \
+#     -f platform/ztunnel-values.yaml --wait
+#
+# Lab-sized requests, like the sidecars in istiod-values.yaml.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi

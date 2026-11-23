@@ -1,0 +1,18 @@
+# EXPERIMENT (bonus B6 lab), new policy. The namespace deny-all (istio/10, `spec: {}`) is enforced
+# by every pod's ztunnel. Once traffic goes through the waypoint, ztunnel sees the WAYPOINT's identity
+# as the caller, not sa/gateway or sa/orders, and the real per-caller checks now happen at the
+# waypoint (12-15). So ztunnel must allow the waypoint in, or nothing gets through.
+# This also enforces "no waypoint bypass": nothing else in the mesh may connect directly to
+# catalog, inventory, orders or payments. The exceptions are nginx on 8080 (11) and orders -> redis (16).
+# An intruder in sidecar mode skips the waypoint and connects straight to ztunnel, so it's rejected here.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-from-waypoint
+  namespace: shop
+spec:
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/shop/sa/waypoint"]

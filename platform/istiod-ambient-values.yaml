@@ -1,0 +1,11 @@
+# Overlay for the istio/istiod chart (bonus B6 lab): turns on ambient support in the control plane.
+# Use it ON TOP of istiod-values.yaml, so access logs, tracing and sizing stay the same:
+#
+#   helm upgrade istiod istio/istiod -n istio-system --version "$ISTIO_VERSION" \
+#     -f platform/istiod-values.yaml -f platform/istiod-ambient-values.yaml --wait
+#
+# The ambient profile sets PILOT_ENABLE_AMBIENT=true (istiod then serves ztunnel and creates the
+# "istio-waypoint" GatewayClass), enables HBONE in sidecars so sidecar and ambient workloads can talk
+# to each other, and switches proxies to the distroless image variant.
+# Sidecar-mode namespaces (intruder, istio-ingress) keep working unchanged.
+profile: ambient

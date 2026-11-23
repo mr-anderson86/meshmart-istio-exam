@@ -1226,3 +1226,235 @@ canary are **phases**:
 - **Compare the results deliberately:** the mirror only produces traffic. Judge v2 by its own metrics
   (error rate and latency for `destination_version="v2"` in Prometheus or Kiali) or its logs, because
   no client ever sees its responses.
+
+**B6 Ambient mode**
+Ambient removes the sidecars. **ztunnel**, one per node, takes over L4: mTLS over HBONE, workload
+identity, L4 AuthorizationPolicies and TCP metrics. A **waypoint** proxy, one Envoy per namespace (or
+per service), takes over L7. It runs at the **destination**, not in the caller's sidecar.
+
+*Extra installs:*
+- **Helm charts:** `istio/base` and `istio/istiod` with `profile=ambient`, plus the two new ones,
+  **`istio/cni`** (required: it redirects pod traffic to ztunnel) and **`istio/ztunnel`**.
+- **Gateway API CRDs:** waypoints are `Gateway` resources of class `istio-waypoint`. Here Traefik
+  already installed v1.6.1.
+
+*Changes per part:*
+- **Namespace label:** `istio.io/dataplane-mode=ambient` replaces `istio-injection=enabled` (pods are
+  restarted once to drop their sidecars), and `istio.io/use-waypoint=waypoint` enrolls the namespace's
+  Services in the waypoint.
+- **Part 4, L4 policies stay with ztunnel unchanged:**
+  - PeerAuthentication 00 (STRICT), and 01, since port-level mTLS is translated into a ztunnel policy;
+  - the deny-all (10);
+  - Redis (16: principal plus port; Redis is TCP anyway, Q4.4).
+- **Part 4, L7 policies need the waypoint:** catalog, inventory, orders and payments (12–15) match
+  `methods` and `paths`. They switch from `selector` to `targetRefs: Service`. Left on a selector, ztunnel
+  skips the L7 rule, so the ALLOW never matches and all traffic is denied.
+- **The gateway policy (11):** its `methods` can't be enforced at all, because the browser reaches nginx
+  directly over the NodePort and no waypoint is in that path. It drops to L4 (port 8080) until an ingress
+  gateway sits in front (B3).
+- **New ztunnel ALLOW for the waypoint's identity:** the destination ztunnel now sees the **waypoint's**
+  identity as the caller, not `sa/gateway` or `sa/orders`. So the deny-all needs this extra policy, which
+  also blocks anyone bypassing the waypoint.
+- **Part 5, all L7, all moves to the waypoint:**
+  - the catalog header route and 90/10 split, with its DR subsets;
+  - payments retries and inventory timeout;
+  - the B1 circuit breaker and B5 mirror.
+
+  VirtualService on waypoints is **Alpha**. The supported API is Gateway API `HTTPRoute`, which needs
+  one Service per version (`catalog-v1`, `catalog-v2`) instead of DR subsets. Its `retry` field isn't in
+  the standard-channel CRDs installed here, so the payments retries would stay a VirtualService or need
+  the experimental channel.
+
+| Policy / config | Enforced by in ambient |
+|---|---|
+| 00, 01 PeerAuthentication · 10 deny-all · 16 redis | ztunnel (unchanged) |
+| 11 gateway | ztunnel, reduced to L4 (no waypoint on the NodePort path) |
+| 12–15 catalog, inventory, orders, payments AuthZ | **waypoint** (`targetRefs`) |
+| 20/21 catalog DR+VS, 30 payments retries, 40 inventory timeout | **waypoint** (VS Alpha, `HTTPRoute` preferred) |
+| new: allow `sa/waypoint` at ztunnel · Redis Service opted out with `istio.io/use-waypoint=none` | ztunnel |
+
+The lab versions of these changes are in [`istio/experiments/ambient/`](istio/experiments/ambient/),
+with the extra chart values in [`platform/istiod-ambient-values.yaml`](platform/istiod-ambient-values.yaml),
+[`platform/istio-cni-values.yaml`](platform/istio-cni-values.yaml) and
+[`platform/ztunnel-values.yaml`](platform/ztunnel-values.yaml). The CNI values set the k3s CNI paths
+and Docker's netns directory, which is what Rancher Desktop needs.
+
+*Before vs after.*
+- **Solid:** allowed traffic.
+- **Dotted, marked ✗:** denied traffic.
+- **Dotted, unmarked:** ztunnel sits transparently in every hop of every `shop` pod. It's not a separate
+  network hop.
+
+Before, every pod carries its own Envoy. Each L7 rule runs in the **caller's** sidecar (routes,
+retries, timeout) or the **destination's** sidecar (AuthZ):
+
+```mermaid
+flowchart LR
+  B([Browser]) -->|"NodePort 30080<br/>GET only"| G
+  subgraph shop["namespace shop: istio-injection=enabled · 7 sidecars ≈ 426Mi"]
+    G["gateway pod<br/>nginx + istio-proxy<br/>AuthZ 11: GET/HEAD"]
+    C["catalog v1 / v2 pods<br/>app + istio-proxy<br/>AuthZ 12"]
+    I["inventory pod<br/>app + istio-proxy<br/>AuthZ 13"]
+    O["orders pod<br/>app + istio-proxy<br/>AuthZ 14"]
+    P["payments pod<br/>app + istio-proxy<br/>AuthZ 15"]
+    R["redis pod<br/>redis + istio-proxy<br/>AuthZ 16 (L4)"]
+    G -->|"mTLS · gateway's sidecar applies<br/>VS 90/10 + x-canary"| C
+    G -->|mTLS| O
+    C -->|"mTLS · catalog's sidecar<br/>applies the timeout"| I
+    O -->|"mTLS · orders' sidecar<br/>applies the retries"| P
+    O -->|"mTLS (TCP)"| R
+  end
+  B2([Browser]) -. "✗ POST: 403 RBAC" .-> G
+  X["intruder pod<br/>(sidecar)"] -. "✗ 403 RBAC" .-> P
+```
+
+After, the app pods have no proxy. Every HTTP call to a `shop` Service goes through the single
+**waypoint**, which applies all the L7 rules once, at the destination side. ztunnel does mTLS and the L4
+checks for every pod. Redis is opted out of the waypoint, so orders → redis stays a direct L4 hop:
+
+```mermaid
+flowchart LR
+  B([Browser]) -->|"NodePort 30080<br/>any method (POST → 405 from nginx)"| G
+  subgraph sys["istio-system (one per node)"]
+    Z["ztunnel · 10Mi<br/>mTLS over HBONE · identities<br/>L4 AuthZ: 00 01 10 11 16 17"]
+    CNI["istio-cni · 79Mi<br/>redirects pod traffic to ztunnel"]
+  end
+  subgraph shop["namespace shop: dataplane-mode=ambient · use-waypoint=waypoint"]
+    G["gateway pod<br/>nginx only"]
+    O["orders pod<br/>app only"]
+    W["waypoint · 56Mi (Envoy)<br/>AuthZ 12–15 (targetRefs)<br/>VS 90/10 + x-canary · retries · timeout"]
+    C["catalog v1 / v2 pods<br/>app only"]
+    I["inventory pod<br/>app only"]
+    P["payments pod<br/>app only"]
+    R["redis pod<br/>use-waypoint=none"]
+    G -->|"HBONE to Service VIP"| W
+    O -->|HBONE| W
+    C -->|"HBONE (→ inventory)"| W
+    W -->|"HBONE as sa/waypoint<br/>(allowed by 17)"| C
+    W --> I
+    W --> P
+    W --> O
+    O -->|"HBONE direct, L4 only<br/>(16: sa/orders)"| R
+  end
+  Z -.- shop
+  CNI -.- shop
+  X["intruder pod<br/>(sidecar, skips waypoints)"] -. "✗ reset by ztunnel → 503" .-> P
+```
+
+*Lab: applied on this cluster and kept.* The cluster now runs `shop` in ambient mode. `check.sh`
+passes 9/9 in both modes.
+
+1. **Baseline** (sidecar mode): `kubectl top pod -n shop --containers`, plus 200 timed requests:
+   ```bash
+   for i in $(seq 200); do curl -s -o /dev/null -w '%{time_total}\n' localhost:30080/api/catalog; done | sort -n \
+     | awk '{a[NR]=$1} END{print "p50",a[int(NR*.5)],"p90",a[int(NR*.9)],"p99",a[int(NR*.99)]}'
+   ```
+2. **Control plane** (sidecars keep working). The CNI agent changes the node's CNI chain, so a test pod
+   checks that new pods still start before going further:
+   ```bash
+   helm upgrade istiod istio/istiod -n istio-system --version 1.31.3 \
+     -f platform/istiod-values.yaml -f platform/istiod-ambient-values.yaml --wait
+   rdctl shell sudo mount --make-rshared /run            # Rancher Desktop only, see below
+   helm upgrade --install istio-cni istio/cni -n istio-system --version 1.31.3 -f platform/istio-cni-values.yaml --wait
+   helm upgrade --install ztunnel istio/ztunnel -n istio-system --version 1.31.3 -f platform/ztunnel-values.yaml --wait
+   kubectl run cnitest -n default --image=busybox:1.36 --restart=Never -- sleep 5 \
+     && kubectl wait -n default pod/cnitest --for=condition=Ready --timeout=60s; kubectl delete pod -n default cnitest
+   ```
+3. **Waypoint, created first** (it has no effect until the namespace is enrolled):
+   ```bash
+   kubectl apply -f istio/experiments/ambient/00-waypoint.yaml -f istio/experiments/ambient/17-authz-allow-waypoint.yaml
+   kubectl label svc redis -n shop istio.io/use-waypoint=none
+   ```
+4. **Switch the namespace:**
+   - Swap the labels and restart, so the pods come back without sidecars.
+   - Replace 11–15 with the ambient versions (same names, so `apply` overwrites them).
+   - During the restart there's a short window of 403s. That's the documented L7 enforcement gap during
+     migration.
+   ```bash
+   kubectl label ns shop istio-injection- istio.io/dataplane-mode=ambient istio.io/use-waypoint=waypoint
+   kubectl rollout restart deploy -n shop
+   kubectl apply -f istio/experiments/ambient/11-authz-gateway.yaml -f istio/experiments/ambient/12-authz-catalog.yaml \
+     -f istio/experiments/ambient/13-authz-inventory.yaml -f istio/experiments/ambient/14-authz-orders.yaml \
+     -f istio/experiments/ambient/15-authz-payments.yaml
+   kubectl rollout status deploy -n shop
+   ```
+
+*Proof:*
+```
+$ kubectl get pods -n shop                    # app pods 1/1 (no istio-proxy), plus the waypoint
+catalog-v1-5859f45477-2b5dk    1/1   Running      ...      waypoint-7c6df5fb69-h79c5   1/1   Running
+
+$ istioctl ztunnel-config workload | grep shop     # every app pod is on HBONE; the waypoint itself is plain TCP
+shop  catalog-v1-5859f45477-2b5dk  10.42.0.173  lima-rancher-desktop  None  HBONE
+...
+shop  waypoint-7c6df5fb69-h79c5    10.42.0.178  lima-rancher-desktop  None  TCP
+
+$ istioctl ztunnel-config service | awk 'NR==1 || $1=="shop"'   # service waypoint: bound per Service
+NAMESPACE  SERVICE NAME  SERVICE VIP    WAYPOINT  ENDPOINTS
+shop       catalog       10.43.232.218  waypoint  2/2
+shop       inventory     10.43.182.34   waypoint  1/1
+shop       orders        10.43.177.125  waypoint  1/1
+shop       payments      10.43.66.26    waypoint  1/1
+shop       redis         10.43.15.63    None      1/1        ← opted out, stays L4
+
+$ kubectl logs -n shop deploy/waypoint      # Part 5 routing now happens in the waypoint (route name, v2 subset)
+"GET /products HTTP/1.1" 200 ... "catalog:8080" ... inbound-vip|8080|http/v2|catalog.shop.svc.cluster.local ... canary-header
+"GET /stock HTTP/1.1" 200 ... "Python-urllib/3.12" ... "inventory:8080" ... inbound-vip|8080|http|inventory.shop.svc.cluster.local
+
+$ kubectl exec -n shop deploy/gateway-v1 -c nginx -- curl -i inventory:8080/stock    # least privilege, enforced by the waypoint
+HTTP/1.1 403 Forbidden
+server: istio-envoy
+RBAC: access denied
+waypoint log: "GET /stock" 403 rbac_access_denied_matched_policy[none] ... inbound-vip|8080|http|inventory...
+
+$ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:30080/
+405        ← nginx's own answer; in sidecar mode policy 11 answered 403 RBAC (the GET/HEAD rule is lost, as expected)
+
+$ tools/check.sh
+  PASS  gateway -> inventory denied (403)
+  PASS  gateway -> payments denied (403)
+  PASS  intruder blocked from payments (got '503')      ← ztunnel resets it; the intruder's sidecar reports 503
+  PASS  intruder blocked from redis
+  PASS  orders succeeded 40/40
+  PASS  v2 got 7/100
+  PASS  10/10 canary-header requests hit v2
+Result: 9 passed, 0 failed
+```
+
+*Measured impact* (`kubectl top`, memory):
+
+| | Sidecar mode | Ambient mode |
+|---|---|---|
+| Mesh proxies | 7 sidecars, 124+49+52+51+49+52+49 = **426Mi** (~23m CPU) | waypoint 56Mi + ztunnel 10Mi + istio-cni 79Mi = **145Mi** (~10m CPU) |
+| App containers | 145Mi | 84Mi (fresh restart, cold caches: not ambient's doing) |
+| Total | ~571Mi | ~229Mi |
+
+- **Mesh overhead:** about two-thirds lower. ztunnel and istio-cni are shared by the whole node, so the
+  saving grows with every pod added.
+
+| `/api/catalog` × 200 | p50 | p90 | p99 |
+|---|---|---|---|
+| Sidecar mode | 47.1 ms | 87.3 ms | 90.8 ms |
+| Ambient mode | 47.0 ms | 50.3 ms | 90.1 ms |
+
+- **Median unchanged:** it's dominated by the app itself (nginx → catalog → inventory).
+- **p90 lower:** consistent with one Envoy per hop instead of two. But it's a single run on a laptop, so
+  read it as "not slower", not as a measured speed-up.
+- **The real gain is resources.**
+
+*Findings from the lab:*
+- **Rancher Desktop needs `/run` shared.** The first istio-cni pod never started:
+  `path /var/run/docker/netns is mounted on /run but it is not a shared or slave mount`.
+  - The chart mounts the netns directory with `mountPropagation: HostToContainer`, and Docker only
+    allows that from a shared mount. In the Rancher Desktop VM, `/run` is private.
+  - The CNI chain wasn't touched, because the agent never ran.
+  - The fix is `rdctl shell sudo mount --make-rshared /run`. To keep it across restarts, add a Lima
+    provisioning script (in the comment of [`platform/istio-cni-values.yaml`](platform/istio-cni-values.yaml)).
+- **Where the waypoint shows up:** a service waypoint appears in `istioctl ztunnel-config service`. The
+  workload view correctly shows `None`.
+- **Intruder result:** it now gets a 503 (connection reset by ztunnel) instead of a 403.
+- **Graded files left unchanged:** `istio/` stays the sidecar version, because the grader applies it to a
+  fresh sidecar cluster.
+  - On **this** ambient cluster, `kubectl apply -f istio/` would bring back the selector-based 11–15,
+    which ztunnel can't evaluate (deny everything).
+  - So re-apply `istio/experiments/ambient/11-…15-` after it.

@@ -1,0 +1,22 @@
+# EXPERIMENT (bonus B6 lab). The L7 proxy for namespace shop in ambient mode: an Envoy Deployment
+# plus Service that istiod creates from this Gateway. It's the same as
+# `istioctl waypoint generate -n shop --for service`.
+# Needs istiod with the ambient profile (platform/istiod-ambient-values.yaml), which creates the
+# istio-waypoint GatewayClass.
+# It handles traffic addressed to Services in shop, once the namespace is labelled
+# istio.io/use-waypoint=waypoint. That's where the VirtualServices, DestinationRules (Part 5) and
+# the L7 AuthorizationPolicies (12-15) now run: at the destination, not in the caller's sidecar.
+# Its identity, cluster.local/ns/shop/sa/waypoint, is what the destination ztunnel sees as the caller.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: waypoint
+  namespace: shop
+  labels:
+    istio.io/waypoint-for: service
+spec:
+  gatewayClassName: istio-waypoint
+  listeners:
+    - name: mesh
+      port: 15008
+      protocol: HBONE

@@ -1,0 +1,39 @@
+# Helm values for the istio/cni chart (bonus B6 lab). Ambient mode requires the Istio CNI node
+# agent: it adds itself to the node's CNI chain and redirects each ambient pod's traffic to ztunnel.
+#
+#   helm upgrade --install istio-cni istio/cni -n istio-system --version "$ISTIO_VERSION" \
+#     -f platform/istio-cni-values.yaml --wait
+#
+# Rancher Desktop specifics (checked inside the VM with `rdctl shell`):
+# - It runs k3s with its bundled flannel CNI. k3s keeps the CNI config and binaries in nonstandard
+#   paths, the same ones the chart's built-in `global.platform=k3s` profile sets.
+# - The container runtime is Docker (node runtime "docker://", k3s's embedded cri-dockerd), not
+#   containerd. Pod network namespaces then live in /var/run/docker/netns, not /var/run/netns
+#   (which doesn't exist in the VM). That's the setting the chart's `global.platform=minikube`
+#   profile uses for minikube's Docker driver.
+# Only one platform profile can be chosen, so the three paths are set explicitly instead.
+#
+# Also required on Rancher Desktop: /run in the VM must be a SHARED mount.
+# - The chart mounts the netns directory with `mountPropagation: HostToContainer`. Docker only allows
+#   that from a shared or slave mount, and Rancher Desktop's Alpine VM mounts /run as private.
+# - Without it, istio-cni-node stays in RunContainerError with:
+#     path /var/run/docker/netns is mounted on /run but it is not a shared or slave mount
+#   The agent never starts, so the CNI chain isn't touched and other pods keep working.
+# Fix it for the current VM boot:
+#   rdctl shell sudo mount --make-rshared /run
+#   rdctl shell grep ' /run ' /proc/self/mountinfo       # must show "shared:NN"
+# Keep it across Rancher Desktop restarts with a Lima provisioning script. Rancher Desktop runs it as
+# root on every VM boot. Create this file (outside the repo), then restart Rancher Desktop:
+#   ~/Library/Application Support/rancher-desktop/lima/_config/override.yaml
+#     provision:
+#       - mode: system
+#         script: |
+#           #!/bin/sh
+#           mount --make-rshared /run
+# To undo: delete override.yaml and restart Rancher Desktop.
+profile: ambient
+
+cni:
+  cniConfDir: /var/lib/rancher/k3s/agent/etc/cni/net.d   # holds 10-flannel.conflist (k3s)
+  cniBinDir: /var/lib/rancher/k3s/data/cni               # flannel, bridge, portmap... (k3s)
+  cniNetnsDir: /var/run/docker/netns                     # Docker runtime

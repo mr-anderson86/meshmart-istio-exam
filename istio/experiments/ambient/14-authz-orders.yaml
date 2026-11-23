@@ -1,0 +1,25 @@
+# EXPERIMENT (bonus B6 lab). Same name as istio/14-authz-orders.yaml, so applying this replaces it.
+# Same rule, but attached to the shop waypoint through the orders Service (targetRefs) instead of
+# selecting the pods. Methods and paths are L7, so only the waypoint can check them. The waypoint
+# still sees the real caller's identity (sa/gateway). If this stayed selector-based, ztunnel would skip the
+# L7 rule and deny ALL traffic to orders. Apply it right after the pods restart without sidecars.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: orders
+  namespace: shop
+spec:
+  targetRefs:
+    - kind: Service
+      group: ""
+      name: orders
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/shop/sa/gateway"]
+      to:
+        - operation:
+            ports: ["8080"]
+            methods: ["GET"]
+            paths: ["/checkout"]
