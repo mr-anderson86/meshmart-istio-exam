@@ -1,0 +1,30 @@
+# EXPERIMENT (bonus B5). Same name as istio/21-catalog-virtualservice.yaml, so applying this replaces
+# it: every user request goes to catalog v1, and the caller's Envoy also sends a copy of each one to
+# v2. The copy is fire-and-forget: Envoy doesn't wait for v2, and v2's response (or error) is thrown
+# away. Users only ever see v1, while v2 gets 100% of real traffic to test against.
+# The x-canary route and the 90/10 split are dropped on purpose, because both would let users see v2.
+# Envoy can add "-shadow" to the Host of mirrored requests, but Istio turns that off by default
+# (DISABLE_SHADOW_HOST_SUFFIX=true in istiod), so the copies arrive at v2 with Host "catalog:8080".
+# A copy keeps the original's x-request-id, so matching request IDs in the v1 and v2 access logs
+# is how you prove the mirroring.
+# Breaks check.sh's canary and header checks while applied. Undo: kubectl apply -f istio/21-catalog-virtualservice.yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: catalog
+  namespace: shop
+spec:
+  hosts:
+    - catalog.shop.svc.cluster.local
+  http:
+    - name: v1-with-mirror
+      route:
+        - destination:
+            host: catalog.shop.svc.cluster.local
+            subset: v1
+          weight: 100
+      mirror:
+        host: catalog.shop.svc.cluster.local
+        subset: v2
+      mirrorPercentage:
+        value: 100.0

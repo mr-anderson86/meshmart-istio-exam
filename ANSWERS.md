@@ -1099,3 +1099,130 @@ copying, but it still runs **inside the app**.
 - sampling at around 1%, or tail-based sampling in an OpenTelemetry Collector, instead of 100%;
 - resource limits and more than one replica for Jaeger;
 - for Kiali, auth instead of anonymous access.
+
+**B5 Mirroring**
+Lives in [`istio/experiments/catalog-mirror.yaml`](istio/experiments/catalog-mirror.yaml).
+
+*Design:* the file uses the same name as
+[`21-catalog-virtualservice.yaml`](istio/21-catalog-virtualservice.yaml), so applying it **replaces**
+the canary VirtualService with a single route:
+```yaml
+http:
+  - name: v1-with-mirror
+    route:
+      - destination: {host: catalog.shop.svc.cluster.local, subset: v1}
+        weight: 100
+    mirror: {host: catalog.shop.svc.cluster.local, subset: v2}
+    mirrorPercentage: {value: 100.0}
+```
+- **Every user request goes to v1.** The caller's Envoy (nginx's sidecar) also sends a **copy** of each
+  one to v2. The copy is fire-and-forget: Envoy doesn't wait for v2, and v2's response, latency or 500s
+  are thrown away. Users get only v1's response, with no added latency.
+- The `x-canary` route and the 90/10 split are **dropped on purpose**. Both would let users see v2
+  responses, and the question rules that out.
+- The file lives in `experiments/` because, while it's applied, `check.sh`'s canary and header-routing
+  checks fail by design.
+
+*Before vs after.* Solid arrows are real traffic whose response goes back to the user. Dotted arrows
+are mirrored copies whose response is thrown away.
+
+*Before (Q5.2 canary):* users can get v2 responses.
+
+```mermaid
+flowchart LR
+  B([Browser]) --> G["gateway (nginx)<br/>+ Envoy applies VS catalog"]
+  G -->|"90% → response to user"| V1[catalog v1]
+  G -->|"10% → response to user"| V2[catalog v2]
+  G -->|"x-canary: always → response to user"| V2
+```
+
+*After (B5 mirror):* users only get v1, and v2 sees 100% of the traffic as copies.
+
+```mermaid
+flowchart LR
+  B([Browser]) --> G["gateway (nginx)<br/>+ Envoy applies VS catalog"]
+  G -->|"100% (x-canary ignored) → response to user"| V1[catalog v1]
+  G -. "copy of 100%, response discarded" .-> V2[catalog v2]
+  V1 --> I[inventory]
+  V2 -. "v2 really processes the copy" .-> I
+```
+
+*Commands:*
+```bash
+# 0. Validate before applying: server dry-run, the diff against the live VS, and istioctl analyze.
+kubectl apply --dry-run=server -f istio/experiments/catalog-mirror.yaml
+kubectl diff -f istio/experiments/catalog-mirror.yaml              # header route + 90/10 → one v1 route + mirror
+istioctl analyze -n shop --use-kube=true istio/experiments/catalog-mirror.yaml   # no issues
+
+# 1. Apply: users go 100% to v1, and v2 gets a copy of every request.
+kubectl apply -f istio/experiments/catalog-mirror.yaml
+
+# 2. Prove users only see v1: 100 plain requests, plus 10 with the canary header.
+for i in $(seq 100); do curl -s localhost:30080/api/catalog | grep -o '"version": "[^"]*"' | head -1; done | sort | uniq -c
+for i in $(seq 10);  do curl -s -H 'x-canary: always' localhost:30080/api/catalog | grep -o '"version": "[^"]*"' | head -1; done | sort | uniq -c
+
+# 3. Prove v2 received the same requests. A mirrored copy keeps the original x-request-id (field 10
+#    when the access log is split on quotes), so compare the request IDs in the two sidecars' logs.
+kubectl logs -n shop deploy/catalog-v1 -c istio-proxy --since=5m | grep 'GET /products' | awk -F'"' '{print $10}' | sort -u > /tmp/v1
+kubectl logs -n shop deploy/catalog-v2 -c istio-proxy --since=5m | grep 'GET /products' | awk -F'"' '{print $10}' | sort -u > /tmp/v2
+wc -l /tmp/v1 /tmp/v2
+diff /tmp/v1 /tmp/v2                  # empty = the exact same requests reached both
+comm -12 /tmp/v1 /tmp/v2 | wc -l      # requests seen by both = mirrored
+
+# 4. Change back: restore the 90/10 canary and the header route, then confirm the graded state.
+kubectl apply -f istio/21-catalog-virtualservice.yaml
+tools/check.sh                        # 9/9
+```
+
+*Evidence:*
+```
+ 100 "version": "v1"                   # step 2, plain requests: no user saw v2
+  10 "version": "v1"                   # step 2, x-canary: always: the header route is gone too
+     110 /tmp/v1                       # step 3: request IDs served by v1 (100 + 10)
+     110 /tmp/v2                       # step 3: request IDs received by v2
+(diff: no output)                      # the same 110 requests at both
+     110                               # comm -12: 100% mirrored
+```
+Here's one request as it appears in both sidecars' access logs: same ID, same millisecond, two pods.
+10.42.0.128 is v2 and 10.42.0.126 is v1.
+```
+[2026-11-23T12:15:53.841Z] "GET /products HTTP/1.1" 200 ... "01499cab-59f1-918f-8435-52067df36c7b" "catalog:8080" "10.42.0.128:8080"   ← v2, the copy
+[2026-11-23T12:15:53.841Z] "GET /products HTTP/1.1" 200 ... "01499cab-59f1-918f-8435-52067df36c7b" "catalog:8080" "10.42.0.126:8080"   ← v1, the real one
+```
+v2 handled all 110 requests, and none of its responses reached the client. After step 4,
+`tools/check.sh` is back to 9/9.
+
+*How to spot the copies:* Envoy can append `-shadow` to a mirrored request's Host, but **Istio turns that
+off by default**: `DISABLE_SHADOW_HOST_SUFFIX=true` in istiod, passed into every mirror policy as
+`DisableShadowHostSuffixAppend`. So v2 sees the normal `catalog:8080` Host, and grepping for
+`catalog-shadow` finds nothing. The reliable marker is the shared `x-request-id`. Istio also creates mirror
+policies with `TraceSampled: false`, so the copies don't add spans to the user's trace.
+
+*Can mirroring be combined with the 90/10 canary, mirroring only the requests that went to v1?* Not
+exactly. `mirror` is a field of the **route**, not of each weighted destination:
+- Envoy picks the 90/10 destination and decides about the mirror **independently**;
+- `match` conditions can only look at the request (headers, URI, method, source), and they're checked
+  before any destination is chosen.
+
+So "mirror only if the destination is v1" can't be expressed, even in Envoy's own config, where
+`request_mirror_policies` sits on the route action. Putting `mirror` on the `weighted-split` route
+works, but the 10% that already go to v2 would be handled by v2 twice: once for real, once as a
+discarded copy. To get exactly that behaviour you'd make the split depend on the request, for example
+a cookie or user group, so v2 users and v1 users match different routes. In practice mirroring and
+canary are **phases**:
+1. mirror first, with 0% of users on v2 and v2 getting 100% copies, while you compare errors and
+   latency;
+2. then canary at 10% → 50% → 100%, with the mirror removed.
+
+*Caveats:*
+- **Side effects are doubled.** v2 really processes each copy, including its own calls to inventory,
+  so inventory's load roughly doubles while the mirror is on. That's safe for catalog, which only
+  reads. Mirroring a write endpoint such as `/checkout` would create duplicate orders or charges.
+  Mirror only idempotent traffic, or point the mirror at a sandbox with fake downstream services.
+- **Capacity:** v2 needs enough capacity to absorb 100% of production load, even though nobody sees
+  its output.
+- **AuthorizationPolicies still apply to the copy:** v2 has to accept requests from the caller (true
+  here, since v1 and v2 share the catalog policy).
+- **Compare the results deliberately:** the mirror only produces traffic. Judge v2 by its own metrics
+  (error rate and latency for `destination_version="v2"` in Prometheus or Kiali) or its logs, because
+  no client ever sees its responses.
