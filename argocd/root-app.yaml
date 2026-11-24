@@ -7,8 +7,11 @@
 # This root syncs the child Application objects wave by wave. With the Application health check in
 # platform/argocd-values.yaml, each wave waits until the previous wave's apps are Healthy.
 #
-# The root syncs on its own. The children start with manual sync (adoption of the existing Helm
-# releases is reviewed app by app), then get `automated` in a follow-up commit.
+# Everything syncs automatically, with self-heal. That's also what makes the waves work on a fresh
+# cluster: a manual child would stay Missing, and the root would wait on it forever.
+# - prune: true is safe here. No Application has the resources-finalizer, so pruning a child
+#   Application never deletes its resources.
+# - The two apps that ship CRDs (istio-base, kps) don't prune.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -25,5 +28,11 @@ spec:
     namespace: argocd
   syncPolicy:
     automated:
-      prune: false
+      prune: true
       selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

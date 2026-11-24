@@ -7,6 +7,14 @@
 #   kubectl -n monitoring get svc kps-prometheus
 auth:
   strategy: anonymous            # lab only - never in production
+# Bonus B7 (Argo CD): left empty, the chart generates a random signing key (randAlphaNum 32) on every
+# render. Argo renders the chart again on each refresh, so the kiali ConfigMap and the Deployment's
+# checksum/config annotation would always be OutOfSync, and every sync would restart Kiali.
+# The key comes from a Secret instead: a fixed value with nothing secret in Git. The chart mounts it
+# because of the secret:<name>:<key> form. Create it once (16, 24 or 32 characters):
+#   kubectl -n istio-system create secret generic kiali-signing-key --from-literal=key="$(openssl rand -hex 16)"
+login_token:
+  signing_key: secret:kiali-signing-key:key
 external_services:
   prometheus:
     url: http://kps-prometheus.monitoring:9090

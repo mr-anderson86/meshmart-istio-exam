@@ -35,6 +35,15 @@ spec:
         - .webhooks[]?.failurePolicy
         - .webhooks[]?.clientConfig.caBundle
   syncPolicy:
+    automated:
+      prune: false      # this app ships CRDs: pruning a CRD would delete every resource of that kind
+      selfHeal: true
+    retry:                # e.g. a CRD or webhook from the previous wave still settling
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
     syncOptions:
       - CreateNamespace=true
       - RespectIgnoreDifferences=true
