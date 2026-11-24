@@ -1453,8 +1453,288 @@ Result: 9 passed, 0 failed
 - **Where the waypoint shows up:** a service waypoint appears in `istioctl ztunnel-config service`. The
   workload view correctly shows `None`.
 - **Intruder result:** it now gets a 503 (connection reset by ztunnel) instead of a 403.
+- **`caller_identity` is `null` again, but identity is still enforced.** The app reads it from the
+  `X-Forwarded-Client-Cert` header ([`app.py`](chart/meshmart/files/app.py)). In sidecar mode, the
+  server-side Envoy adds that header (Q2.3). In ambient mode, nothing adds it:
+  - ztunnel works at L4 and never reads HTTP, so it can't add a header.
+  - The waypoint checks the caller, then opens a new tunnel to the backend under its own identity
+    (`sa/waypoint`). It doesn't forward the caller's identity as a header.
+
+  The identity still travels with every connection and decides the result. Here ztunnel logs the gateway
+  and catalog calling inventory through the same waypoint:
+  ```
+  src.workload="gateway-v1-…" src.identity="spiffe://cluster.local/ns/shop/sa/gateway" dst.service="inventory.shop.svc.cluster.local" dst.workload="waypoint-…" dst.identity="spiffe://cluster.local/ns/shop/sa/waypoint"
+  src.workload="catalog-v1-…" src.identity="spiffe://cluster.local/ns/shop/sa/catalog" dst.service="inventory.shop.svc.cluster.local" dst.workload="waypoint-…" dst.identity="spiffe://cluster.local/ns/shop/sa/waypoint"
+  ```
+  The waypoint decides on that identity. The gateway gets `403 RBAC: access denied`. Catalog gets `200`.
 - **Graded files left unchanged:** `istio/` stays the sidecar version, because the grader applies it to a
   fresh sidecar cluster.
   - On **this** ambient cluster, `kubectl apply -f istio/` would bring back the selector-based 11–15,
     which ztunnel can't evaluate (deny everything).
   - So re-apply `istio/experiments/ambient/11-…15-` after it.
+
+**B7 GitOps with Argo CD**
+Everything in the mesh now comes from Git, from this branch. There is one manual bootstrap step: installing
+Argo CD itself with Helm ([`platform/argocd-values.yaml`](platform/argocd-values.yaml), chart 10.17.2 =
+Argo CD v3.6.1). One root Application, applied once by hand, creates every other Application from
+[`argocd/apps/`](argocd/apps/). No `helm upgrade` has been run against the mesh since.
+
+*In production, the bootstrap would be code too.* The two manual steps here (`helm install argocd` and
+`kubectl apply -f argocd/root-app.yaml`) are fine for a lab. In production they'd be managed by an IaC
+tool such as Terraform (or OpenTofu or Pulumi), usually in the same code that creates the cluster:
+- **What the IaC would create:** the Argo CD Helm release (`helm_release`) with the same values file,
+  the root Application (`kubernetes_manifest`), and the repo credentials (for example a GitHub App key
+  read from a secret manager and never stored in Git).
+- **The split:** IaC owns everything up to "Argo CD is running and points at Git". Argo CD owns everything
+  after that.
+- **What it buys:** a new or rebuilt cluster comes up with one `terraform apply` and no hand-typed
+  commands. Argo CD's own version and settings are reviewed and versioned like everything else.
+- **One-time secrets:** the `kiali-signing-key` Secret, created by hand here, would come from the same
+  pipeline or from a secret manager through the External Secrets Operator.
+
+*Design: app-of-apps, not an ApplicationSet.*
+- **Ordering:** sync waves only order resources **inside one Application**. Ordering *across* apps needs a
+  parent: the root ([`argocd/root-app.yaml`](argocd/root-app.yaml)) syncs the child `Application`
+  objects wave by wave. An ApplicationSet can't do that without the opt-in Progressive Syncs feature.
+- **Health gate:** Argo CD no longer assesses the health of `Application` objects by default, so the root
+  would treat a child as done the moment it exists. The Lua health check in
+  [`platform/argocd-values.yaml`](platform/argocd-values.yaml) returns the child's own health, so wave N+1
+  starts only when every wave-N app is **Healthy**.
+- **Per-app quirks stay readable:** istiod's `ignoreDifferences`, kps's `ServerSideApply`, the composed
+  istio-config app. In an ApplicationSet each one would be a template conditional.
+- **Values stay in `platform/`:** every app is multi-source. The chart comes from its Helm repo, and this
+  repo is a second source with `ref: values`, so `valueFiles: [$values/platform/<app>-values.yaml]` reads
+  the same values files the `helm` commands used.
+
+```mermaid
+flowchart TB
+  ROOT["meshmart-root<br/>applied once by hand<br/>path: argocd/apps"]
+  subgraph WM1["wave -1"]
+    PRJ["AppProject meshmart<br/>allowed repos + namespaces"]
+  end
+  subgraph W0["wave 0"]
+    BASE["istio-base<br/>CRDs"]
+  end
+  subgraph W1["wave 1"]
+    ISTIOD["istiod"]
+  end
+  subgraph W2["wave 2"]
+    CNI["istio-cni"]
+    ZT["ztunnel"]
+  end
+  subgraph W3["wave 3"]
+    KPS["kps"]
+    JAE["jaeger"]
+  end
+  subgraph W4["wave 4"]
+    KIA["kiali-server"]
+  end
+  subgraph W5["wave 5"]
+    MM["meshmart<br/>chart + shop Namespace"]
+  end
+  subgraph W6["wave 6"]
+    CFG["istio-config<br/>istio/ + experiments/ambient/"]
+  end
+  ROOT -->|"creates the child apps,<br/>in wave order"| WM1
+  WM1 -.->|Healthy| W0
+  W0 -.->|Healthy| W1
+  W1 -.->|Healthy| W2
+  W2 -.->|Healthy| W3
+  W3 -.->|Healthy| W4
+  W4 -.->|Healthy| W5
+  W5 -.->|Healthy| W6
+```
+- **Solid:** the root syncs the child `Application` objects, starting with wave -1.
+- **Dotted:** the gate. The next wave starts only when every app in the previous wave reports Healthy.
+
+| Wave | Application | Source | Why here / extras |
+|---|---|---|---|
+| -1 | `meshmart` AppProject | [`project.yaml`](argocd/apps/project.yaml) | Limits the apps to this repo + the 4 chart repos, and to istio-system, monitoring, kube-system, tracing, shop |
+| 0 | `istio-base` | `base` 1.31.3 | The CRDs everything else uses. Webhook `ignoreDifferences` (see below), no prune |
+| 1 | `istiod` | `istiod` 1.31.3 + ambient overlay | Webhook `ignoreDifferences` (**the answer**, below) |
+| 2 | `istio-cni`, `ztunnel` | `cni`, `ztunnel` 1.31.3 | Ambient data plane (B6) |
+| 3 | `kps`, `jaeger` | kube-prometheus-stack 92.17.1, jaeger 4.16.1 | kps: `ServerSideApply` (its CRDs exceed the 256KB annotation limit of client-side apply), no prune |
+| 4 | `kiali-server` | kiali-server 2.34.1 | Reads from Prometheus and Jaeger |
+| 5 | `meshmart` | [`chart/meshmart`](chart/meshmart/) + [`argocd/extra/meshmart/`](argocd/extra/meshmart/namespace.yaml) | The shop Namespace with its ambient labels is in Git too, with `Delete=false` |
+| 6 | `istio-config` | [`istio/`](istio/) (00, 01, 10, 16, 20, 21, 30, 40) + [`istio/experiments/ambient/`](istio/experiments/ambient/) | Last: needs the CRDs, the mesh and the Services. Composed for ambient (below) |
+
+*Adoption: nothing was deleted or reinstalled.*
+Every app sets `helm.releaseName` to the existing release name, so Argo renders exactly the objects Helm
+had created, with the same names. Syncing only added Argo's `argocd.argoproj.io/tracking-id` annotation.
+Running `helm uninstall` first would have been an outage: it deletes istiod, the webhooks, the CNI,
+ztunnel and the whole app.
+```bash
+# 1. Bootstrap Argo CD (the one manual Helm install), then log in.
+helm upgrade --install argocd argo-cd --repo https://argoproj.github.io/argo-helm --version 10.17.2 \
+  -n argocd --create-namespace -f platform/argocd-values.yaml --wait
+# 2. After pushing argocd/: create the root. It creates the project and the 9 apps.
+kubectl apply -f argocd/root-app.yaml
+# 3. Review before letting Argo touch anything.
+argocd app diff <app>        # only the tracking annotation everywhere, except 2 real diffs (below)
+# 4. Turn on automated sync (one commit), re-apply the root for its own policy, verify.
+argocd app list              # all 10 Synced / Healthy
+tools/check.sh               # 9/9
+# 5. Helm's release records: delete only the sh.helm.release.v1.* Secrets, not the releases' objects.
+kubectl get secret -A -l owner=helm -o yaml > ~/helm-release-records-backup.yaml     # for undo
+for r in istio-system/istio-base istio-system/istiod istio-system/istio-cni istio-system/ztunnel \
+         istio-system/kiali-server monitoring/kps tracing/jaeger shop/meshmart; do
+  kubectl -n "${r%/*}" delete secret -l owner=helm,name="${r#*/}"
+done
+```
+Result of step 5: 14 release-record Secrets deleted (every revision of the 8 releases). Helm only lists
+what's out of scope (Argo CD itself and k3s's own charts). Every app stays Synced/Healthy, and no pod
+restarted:
+```
+$ helm list -A
+NAME        NAMESPACE    REVISION  STATUS    CHART
+argocd      argocd       1         deployed  argo-cd-10.17.2
+headlamp    kube-system  1         deployed  headlamp-0.45.0
+traefik     kube-system  2         deployed  traefik-40.1.5+up40.1.0
+traefik-crd kube-system  1         deployed  traefik-crd-40.1.5+up40.1.0
+$ argocd app list          # all 10: Synced  Healthy
+$ kubectl -n istio-system get pods
+istio-cni-node-4kll5      1/1   Running   1 (22h ago)   23h      # same pods, ages unchanged
+istiod-55fb6d4749-28486   1/1   Running   1 (22h ago)   23h
+ztunnel-mwzgf             1/1   Running   1 (22h ago)   23h
+```
+The two real diffs found in step 3:
+- **Kiali never stays in sync.** Its chart generates `signing_key` with `randAlphaNum` when none is set,
+  so every render differs: the app would be OutOfSync forever and restart Kiali on each sync. The fix is
+  to read the key from a Secret (`login_token.signing_key: secret:kiali-signing-key:key` in
+  [`platform/kiali-values.yaml`](platform/kiali-values.yaml)). The Secret is created once, out of Git.
+- **The shop Namespace** gained the `Delete=false` annotation. That was intended: deleting the app must
+  never delete the namespace.
+
+*The istiod resource that stays OutOfSync (the question).*
+**Which:** `ValidatingWebhookConfiguration istio-validator-istio-system`.
+
+**Why:** the chart and the cluster legitimately disagree on two fields.
+- The chart renders it with `failurePolicy: Ignore` and **no `caBundle`**. That's on purpose: a freshly
+  installed istiod must not block every Istio config write before its webhook is up.
+- Once the webhook is serving, istiod's own controller patches the live object to `failurePolicy: Fail`
+  and injects its CA bundle.
+- So Git says `Ignore`, the cluster says `Fail`, and Argo reports OutOfSync forever, even though both
+  are correct. A plain sync is worse than useless: it writes `Ignore` back, then istiod patches it to
+  `Fail` again. Two controllers fight over the same field.
+
+Evidence, from Argo's render vs the live object vs the field owners:
+```
+$ argocd app manifests istiod | …          # what Git wants
+  name: istio-validator-istio-system
+  failurePolicy: Ignore                     # and no caBundle at all
+$ kubectl get validatingwebhookconfiguration istio-validator-istio-system -o json | jq …
+rev.validation.istio.io  failurePolicy=Fail  caBundle=1460 chars
+$ kubectl get validatingwebhookconfiguration istio-validator-istio-system --show-managed-fields -o json \
+    | jq -r '.metadata.managedFields[] | "\(.manager)  \(.operation)  \(.fieldsV1 | tostring | test("failurePolicy"))"'
+helm  Apply  false
+pilot-discovery  Update  true              # istiod (pilot-discovery) is the writer of failurePolicy
+argocd-controller  Update  false
+```
+
+**The proper fix:** tell Argo that those two fields belong to istiod
+([`argocd/apps/10-istiod.yaml`](argocd/apps/10-istiod.yaml)):
+```yaml
+ignoreDifferences:
+  - group: admissionregistration.k8s.io
+    kind: ValidatingWebhookConfiguration
+    name: istio-validator-istio-system
+    jqPathExpressions:
+      - .webhooks[]?.failurePolicy
+      - .webhooks[]?.clientConfig.caBundle
+syncPolicy:
+  syncOptions:
+    - RespectIgnoreDifferences=true    # without it, a sync would still overwrite them
+```
+- `ignoreDifferences` only hides the fields from the **diff**.
+- `RespectIgnoreDifferences=true` also keeps them out of the **sync**, so Argo never writes `Ignore`
+  back.
+- These are not fixes:
+  - disabling validation (it loses the safety net);
+  - hard-coding the `caBundle` in Git (it's generated in the cluster and rotates);
+  - clicking Sync (it starts the fight again).
+
+Result after automated syncs: `istiod  Synced  Healthy`, and the live policy stays `Fail`.
+
+`istio-base` has the same pattern on `istiod-default-validator` (chart: `Ignore`, live: `Fail`), so
+[`00-istio-base.yaml`](argocd/apps/00-istio-base.yaml) carries the same rule.
+
+*Sync policy.*
+- **Automated, with self-heal, everywhere, the root included.** It's not just convenience: on a fresh
+  cluster a manual child stays Missing, and the root's wave gate waits for it forever.
+- **`prune: true`, except `istio-base` and `kps`:** these apps ship CRDs, and pruning a CRD deletes every
+  resource of that kind.
+- **No `resources-finalizer` on any app:** deleting an Application never deletes what it deployed.
+  That's also what makes `prune: true` safe on the root.
+- **`retry`:** 5 attempts with backoff from 10s to 3m, for a CRD or webhook from the previous wave that's
+  still settling.
+
+*Self-heal proof* (changes made by hand, reverted by Argo within seconds):
+```
+# 1. Scale the canary to 0 (meshmart app)
+$ kubectl -n shop scale deploy catalog-v2 --replicas=0
+catalog-v2   0/1     1            0           27d
+catalog-v2   1/1     1            1           27d
+application/meshmart   Updated health status: Healthy -> Progressing (Caused by apps/Deployment:shop/catalog-v2)
+application/meshmart   Updated health status: Progressing -> Healthy
+
+# 2. Delete a security policy (istio-config app)
+$ kubectl -n shop delete authorizationpolicy payments
+payments   ALLOW    6s                     # recreated
+application/istio-config   Updated sync status: Synced -> OutOfSync
+application/istio-config   Partial sync operation to 170957c… succeeded      # only the drifted object
+application/istio-config   Updated sync status: OutOfSync -> Synced
+
+# 3. Remove redis's waypoint opt-out label (meshmart app)
+$ kubectl -n shop label svc redis istio.io/use-waypoint-
+$ sleep 15; kubectl -n shop get svc redis --show-labels
+… istio.io/use-waypoint=none               # back, from Git
+
+$ tools/check.sh
+Result: 9 passed, 0 failed
+```
+In step 2 the gap fails **closed**: while the payments ALLOW is missing, the deny-all still applies, so
+orders → payments is denied for a few seconds. It's never briefly open.
+
+*Ambient specifics:*
+- **No more hand-made changes outside Git.** Two ambient settings used to be `kubectl label` commands:
+  - The redis Service's `istio.io/use-waypoint=none` is now a chart value, `redis.serviceLabels` in
+    [`platform/meshmart-values.yaml`](platform/meshmart-values.yaml). With the value unset, the chart's
+    output is identical to before.
+  - The shop Namespace with its `dataplane-mode` and `use-waypoint` labels is in
+    [`argocd/extra/meshmart/namespace.yaml`](argocd/extra/meshmart/namespace.yaml).
+- **istio-config is composed:**
+  - It takes the graded `istio/` files that ambient doesn't change, through a `directory.include` glob
+    that leaves 11–15 out.
+  - It adds everything in `istio/experiments/ambient/`.
+  - Directory sources don't recurse, so `istio/README.md` and the other experiments are never picked up.
+  - `istio/` itself stays the sidecar version for the grader.
+- **The waypoint rolled out once** at the first sync. istiod copies a Gateway's annotations onto the
+  waypoint Deployment, Argo's tracking annotation included. Argo ignores the copy, because the tracking
+  ID names the Gateway, not the Deployment. So there's no prune risk.
+
+*Findings:*
+- **Synced/Healthy doesn't mean the mesh works.**
+  - **What happened:** after a Rancher Desktop restart, the shop pods came back before istio-cni could
+    enroll them. Everything looked green: Argo reported Synced/Healthy, `istioctl ztunnel-config` showed
+    HBONE, the waypoint was mapped, and ztunnel had every policy. But traffic went pod to pod directly,
+    and `check.sh` failed 5/9: gateway → inventory 200, canary 52/100.
+  - **The telltale:** ztunnel and the waypoint logged zero connections. istio-cni had said so at boot:
+    ```
+    error cni-agent failed to reconcile inpod rules for pod, try restarting the pod ... can't find netns for pod   ns=shop name=gateway-v1-…
+    ```
+  - **The fix:** `kubectl -n shop rollout restart deploy`, after which `check.sh` passed 9/9. Argo can't
+    catch this, because it compares objects, not the data plane. After any node restart, run
+    `tools/check.sh` or check ztunnel's access log.
+- **Argo CD CLI on Rancher Desktop:** `kubectl port-forward` dies on the first connection reset. The CLI's
+  own port-forward is reliable:
+  `export ARGOCD_OPTS='--port-forward --port-forward-namespace argocd --plaintext'`.
+- **Istio chart repo:** the old GCS URL doesn't have 1.31.3. The apps use
+  `https://blob.istio.io/istio-release/charts`.
+
+*Undo* (back to plain Helm, with nothing deleted from the cluster):
+```bash
+kubectl -n argocd delete application meshmart-root     # first, or it recreates the children
+kubectl -n argocd delete applications --all            # no finalizer: the workloads stay
+kubectl apply -f ~/helm-release-records-backup.yaml    # Helm knows its releases again
+helm uninstall argocd -n argocd
+```
