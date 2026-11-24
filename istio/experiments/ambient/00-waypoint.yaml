@@ -1,4 +1,5 @@
-# EXPERIMENT (bonus B6 lab). The L7 proxy for namespace shop in ambient mode: an Envoy Deployment
+# Bonus B6 (ambient), live: synced by Argo CD (argocd/apps/60-istio-config.yaml).
+# The L7 proxy for namespace shop in ambient mode: an Envoy Deployment
 # plus Service that istiod creates from this Gateway. It's the same as
 # `istioctl waypoint generate -n shop --for service`.
 # Needs istiod with the ambient profile (platform/istiod-ambient-values.yaml), which creates the

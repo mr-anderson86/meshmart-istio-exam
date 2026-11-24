@@ -1,0 +1,35 @@
+# AppProject for the MeshMart apps (wave -1, so it exists before any Application uses it).
+# Least privilege where it's practical:
+# - sources: only this repo and the four chart repos;
+# - destinations: only the namespaces the charts write to (kube-system holds kps' coredns Service).
+# The cluster-scoped kinds stay open. The Istio and kps charts install CRDs, webhooks, ClusterRoles and
+# more, and the meshmart app manages the shop Namespace.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: meshmart
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  description: MeshMart Istio exam - mesh, observability, app and policies
+  sourceRepos:
+    - https://github.com/mr-anderson86/meshmart-istio-exam.git
+    - https://blob.istio.io/istio-release/charts
+    - https://prometheus-community.github.io/helm-charts
+    - https://kiali.org/helm-charts
+    - https://jaegertracing.github.io/helm-charts
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: istio-system
+    - server: https://kubernetes.default.svc
+      namespace: monitoring
+    - server: https://kubernetes.default.svc
+      namespace: kube-system
+    - server: https://kubernetes.default.svc
+      namespace: tracing
+    - server: https://kubernetes.default.svc
+      namespace: shop
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"

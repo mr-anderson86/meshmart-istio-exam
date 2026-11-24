@@ -1,0 +1,27 @@
+# Wave 4: Kiali. It comes after Prometheus and Jaeger (wave 3), which it reads metrics and traces from.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kiali-server
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://kiali.org/helm-charts
+      chart: kiali-server
+      targetRevision: 2.34.1
+      helm:
+        releaseName: kiali-server
+        valueFiles:
+          - $values/platform/kiali-values.yaml
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

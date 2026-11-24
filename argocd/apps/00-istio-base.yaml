@@ -1,0 +1,40 @@
+# Wave 0: Istio CRDs and cluster-wide resources. Everything else depends on these CRDs.
+# releaseName matches the existing Helm release, so Argo adopts the same objects in place.
+# There's no resources-finalizer on purpose: deleting this Application must never delete the CRDs,
+# because that would delete every Istio resource in the cluster with them.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-base
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://blob.istio.io/istio-release/charts
+      chart: base
+      targetRevision: 1.31.3
+      helm:
+        releaseName: istio-base
+        valueFiles:
+          - $values/platform/istio-base-values.yaml
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  # Same webhook pattern as istiod (see 10-istiod.yaml). The chart renders istiod-default-validator with
+  # failurePolicy Ignore, and istiod switches it to Fail and injects the CA once its webhook is serving.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: istiod-default-validator
+      jqPathExpressions:
+        - .webhooks[]?.failurePolicy
+        - .webhooks[]?.clientConfig.caBundle
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true

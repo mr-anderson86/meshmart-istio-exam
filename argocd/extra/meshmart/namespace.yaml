@@ -1,0 +1,11 @@
+# The shop namespace, enrolled in ambient mode (B6) and in the shop waypoint.
+# Delete=false: removing the meshmart Application (or pruning) never deletes the namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+  labels:
+    istio.io/dataplane-mode: ambient
+    istio.io/use-waypoint: waypoint
+  annotations:
+    argocd.argoproj.io/sync-options: Delete=false

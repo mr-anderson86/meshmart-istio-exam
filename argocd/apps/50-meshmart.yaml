@@ -1,0 +1,30 @@
+# Wave 5: the MeshMart app, from the local chart in this repo, after the mesh it joins (waves 0-2).
+# Second source, extra manifests: the shop Namespace with its mesh labels. Argo applies Namespaces
+# before the other resources in an app, so the pods always start already enrolled in the mesh. Before
+# Argo, the namespace came from `helm --create-namespace` and the labels from `kubectl label`.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: meshmart
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      path: chart/meshmart
+      helm:
+        releaseName: meshmart
+        valueFiles:
+          - $values/platform/meshmart-values.yaml
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      ref: values
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      path: argocd/extra/meshmart
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shop

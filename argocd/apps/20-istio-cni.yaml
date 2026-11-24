@@ -1,0 +1,29 @@
+# Wave 2: Istio CNI node agent (ambient, B6). It redirects ambient pods' traffic to ztunnel.
+# Rancher Desktop needs /run to be a shared mount for this DaemonSet to start; see the comment in
+# platform/istio-cni-values.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-cni
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://blob.istio.io/istio-release/charts
+      chart: cni
+      targetRevision: 1.31.3
+      helm:
+        releaseName: istio-cni
+        valueFiles:
+          - $values/platform/istio-cni-values.yaml
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

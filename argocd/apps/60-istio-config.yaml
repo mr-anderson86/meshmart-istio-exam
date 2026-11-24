@@ -1,0 +1,31 @@
+# Wave 6: the istio/ folder (Parts 4 and 5), last, once the CRDs, the mesh and the workloads exist.
+# The cluster runs shop in ambient mode (B6), so this app combines two directories of this repo:
+# 1. istio/: the graded files that ambient doesn't change (PeerAuthentication 00/01, deny-all 10,
+#    redis 16, catalog DR/VS 20/21, payments retries 30, inventory timeout 40). 11-15 are left out on
+#    purpose.
+# 2. istio/experiments/ambient/: the waypoint, the ambient versions of 11-15 (same names, L4 or
+#    targetRefs), and 17 (allow the waypoint's identity at ztunnel).
+# Directory sources don't recurse, so istio/README.md and the other experiments are never picked up.
+# The graded istio/ folder itself stays the sidecar version for `kubectl apply -f istio/` on a fresh
+# cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      path: istio
+      directory:
+        include: "{00-*,01-*,10-*,16-*,20-*,21-*,30-*,40-*}.yaml"
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      path: istio/experiments/ambient
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shop

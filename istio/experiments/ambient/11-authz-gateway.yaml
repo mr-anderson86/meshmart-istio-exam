@@ -1,4 +1,5 @@
-# EXPERIMENT (bonus B6 lab). Same name as istio/11-authz-gateway.yaml, so applying this replaces it.
+# Bonus B6 (ambient), live: synced by Argo CD (argocd/apps/60-istio-config.yaml).
+# Same name as istio/11-authz-gateway.yaml, so applying this replaces it.
 # The browser reaches nginx directly through the NodePort, so there's no waypoint in that path and
 # only ztunnel sees the traffic. ztunnel can't evaluate the L7 `methods: [GET, HEAD]` rule: with a
 # workload selector it would skip that rule, no ALLOW would ever match, and the UI would break.

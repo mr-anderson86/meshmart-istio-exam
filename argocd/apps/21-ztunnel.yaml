@@ -1,0 +1,28 @@
+# Wave 2: ztunnel, the per-node L4 proxy of ambient mode (B6). It handles mTLS (HBONE), identities and
+# L4 AuthorizationPolicies. It gets its config from istiod (wave 1).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ztunnel
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://blob.istio.io/istio-release/charts
+      chart: ztunnel
+      targetRevision: 1.31.3
+      helm:
+        releaseName: ztunnel
+        valueFiles:
+          - $values/platform/ztunnel-values.yaml
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

@@ -1,4 +1,5 @@
-# EXPERIMENT (bonus B6 lab). Same name as istio/14-authz-orders.yaml, so applying this replaces it.
+# Bonus B6 (ambient), live: synced by Argo CD (argocd/apps/60-istio-config.yaml).
+# Same name as istio/14-authz-orders.yaml, so applying this replaces it.
 # Same rule, but attached to the shop waypoint through the orders Service (targetRefs) instead of
 # selecting the pods. Methods and paths are L7, so only the waypoint can check them. The waypoint
 # still sees the real caller's identity (sa/gateway). If this stayed selector-based, ztunnel would skip the

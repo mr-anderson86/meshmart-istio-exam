@@ -1,0 +1,47 @@
+# Wave 1: control plane. The base values plus the ambient overlay (B6), in the same order as the helm
+# command, so tracing, access logs and sizing stay the same.
+#
+# The resource Argo keeps showing OutOfSync: ValidatingWebhookConfiguration istio-validator-istio-system.
+# - Why: the chart renders it with failurePolicy: Ignore and no caBundle on purpose, so a freshly
+#   installed (or restarting) istiod can't block every Istio config write before its webhook is serving.
+#   Once the webhook is ready, istiod's own controller patches the live object to failurePolicy: Fail
+#   and injects the CA bundle. Git says Ignore, live says Fail, so Argo reports OutOfSync forever.
+#   Syncing makes it worse: it resets the policy to Ignore until istiod patches it back (a fight).
+# - The proper fix: tell Argo those two fields belong to istiod. ignoreDifferences hides them from the
+#   diff, and RespectIgnoreDifferences=true keeps a sync from overwriting them. Don't override the
+#   policy in values, and don't disable validation.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istiod
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://blob.istio.io/istio-release/charts
+      chart: istiod
+      targetRevision: 1.31.3
+      helm:
+        releaseName: istiod
+        valueFiles:
+          - $values/platform/istiod-values.yaml
+          - $values/platform/istiod-ambient-values.yaml
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: istio-validator-istio-system
+      jqPathExpressions:
+        - .webhooks[]?.failurePolicy
+        - .webhooks[]?.clientConfig.caBundle
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true

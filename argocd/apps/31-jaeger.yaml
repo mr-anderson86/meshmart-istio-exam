@@ -1,0 +1,27 @@
+# Wave 3: Jaeger all-in-one (B4). istiod sends spans here (extensionProviders), and Kiali reads from it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jaeger
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: meshmart
+  sources:
+    - repoURL: https://jaegertracing.github.io/helm-charts
+      chart: jaeger
+      targetRevision: 4.16.1
+      helm:
+        releaseName: jaeger
+        valueFiles:
+          - $values/platform/jaeger-values.yaml
+    - repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+      targetRevision: exam/mr-anderson86
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tracing
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

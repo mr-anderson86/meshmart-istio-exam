@@ -1,4 +1,5 @@
-# EXPERIMENT (bonus B6 lab), new policy. The namespace deny-all (istio/10, `spec: {}`) is enforced
+# Bonus B6 (ambient), live: synced by Argo CD (argocd/apps/60-istio-config.yaml).
+# New policy. The namespace deny-all (istio/10, `spec: {}`) is enforced
 # by every pod's ztunnel. Once traffic goes through the waypoint, ztunnel sees the WAYPOINT's identity
 # as the caller, not sa/gateway or sa/orders, and the real per-caller checks now happen at the
 # waypoint (12-15). So ztunnel must allow the waypoint in, or nothing gets through.

@@ -1,0 +1,29 @@
+# Bonus B7: the app-of-apps root. Apply it once by hand; from then on Argo CD manages everything in
+# argocd/apps/ (the AppProject and one Application per component):
+#
+#   kubectl apply -f argocd/root-app.yaml
+#
+# Why app-of-apps instead of an ApplicationSet: sync waves only order resources inside ONE Application.
+# This root syncs the child Application objects wave by wave. With the Application health check in
+# platform/argocd-values.yaml, each wave waits until the previous wave's apps are Healthy.
+#
+# The root syncs on its own. The children start with manual sync (adoption of the existing Helm
+# releases is reviewed app by app), then get `automated` in a follow-up commit.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: meshmart-root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mr-anderson86/meshmart-istio-exam.git
+    targetRevision: exam/mr-anderson86        # switch to HEAD once merged to main
+    path: argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true

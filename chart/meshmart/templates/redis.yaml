@@ -50,6 +50,9 @@ metadata:
   labels:
     {{- include "meshmart.labels" . | nindent 4 }}
     app: redis
+    {{- with .Values.redis.serviceLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     app: redis

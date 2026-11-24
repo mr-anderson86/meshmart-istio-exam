@@ -1,0 +1,35 @@
+# Helm values for the argo-cd chart (bonus B7). This is the one manual bootstrap step. Everything else
+# in the mesh is then managed by Argo CD from argocd/ (app-of-apps).
+#
+#   helm upgrade --install argocd argo-cd --repo https://argoproj.github.io/argo-helm --version 10.17.2 \
+#     -n argocd --create-namespace -f platform/argocd-values.yaml --wait
+#
+# Chart 10.17.2 is Argo CD v3.6.1.
+
+configs:
+  params:
+    # Serve the UI and API over plain HTTP, reached only through `kubectl port-forward` (lab only).
+    server.insecure: true
+  cm:
+    # Application health check. Argo CD dropped the built-in health assessment for Application objects.
+    # Without it, the root app treats a child Application as healthy the moment it exists, so sync waves
+    # across apps wouldn't wait. With it, wave N+1 starts only when every wave-N child is Healthy.
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil then
+        if obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+      end
+      return hs
+
+# Not needed in the lab: local admin login only, and no notifications.
+dex:
+  enabled: false
+notifications:
+  enabled: false

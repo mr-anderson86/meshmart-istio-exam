@@ -1,0 +1,10 @@
+# Helm values for the local meshmart chart (bonus B7). Used by Argo CD (argocd/apps/50-meshmart.yaml).
+# Everything else keeps the chart defaults.
+#
+# Ambient (B6): Redis is opted out of the shop waypoint. It's plain TCP, so it gets no benefit from
+# L7. Through the waypoint, ztunnel would also see the caller as sa/waypoint instead of sa/orders, and
+# policy 16 (allow only orders) would block it. The label used to be set with
+# `kubectl label svc redis istio.io/use-waypoint=none`. Now it's declared here, so Argo keeps it.
+redis:
+  serviceLabels:
+    istio.io/use-waypoint: none
